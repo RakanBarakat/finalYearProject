@@ -1,0 +1,38 @@
+# --- System & OS Files ---
+/nul
+nul
+.DS_Store
+Thumbs.db
+
+# --- Dependencies & Environments ---
+node_modules/
+**/node_modules/
+.venv/
+**/.venv/
+venv/
+env/
+
+# --- Build Outputs ---
+.next/
+**/.next/
+dist/
+build/
+**/__pycache__/
+
+# --- Large Model Files & Checkpoints ---
+# Excludes heavy weights from classifier-training and app
+*.safetensors
+*.pt
+*.bin
+*.pth
+*.ckpt
+checkpoint-*/
+**/checkpoint-*/
+
+# --- Archives & Large Configs ---
+*.rar
+*.zip
+*.7z
+*.tar.gz
+# Add specific large config files if they have unique extensions
+# *.json (only if your "huge" configs are specifically .json)
