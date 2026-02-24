@@ -23,6 +23,8 @@ type Guard = {
 // --- API CLIENT ---
 const api = axios.create({ baseURL: "http://localhost:8000" });
 
+const HF_TOKEN_STORAGE_KEY = "guardrails_hf_token";
+
 // --- BUILD MODE STATE TYPE ---
 type BuildModeState = {
   activeGuard: Guard | null;
@@ -738,14 +740,17 @@ function ArchitectureBuilder({ onClose, onSave, editingGuard }: { onClose: () =>
       savedGuardId = saveRes.data.id;
     }
 
-    // Save API keys for LLM layers
-    const llmLayers = layers.filter(l => l.type === "llm" && l.enabled && l.apiKey);
+    // Save API keys for external LLM layers (always call so key is stored when user entered it; backend keeps existing if empty)
+    const externalPrefixes = ["openrouter/", "openai/", "abliteration/"];
+    const llmLayers = layers.filter(
+      l => l.type === "llm" && l.enabled && l.llmModel && externalPrefixes.some(p => l.llmModel.startsWith(p))
+    );
     for (const layer of llmLayers) {
       const provider = layer.llmModel.split("/")[0];
       await api.post("/set-llm-api-key", {
         guard_id: savedGuardId,
         provider,
-        api_key: layer.apiKey
+        api_key: layer.apiKey || ""
       });
     }
     
@@ -1002,34 +1007,21 @@ function ArchitectureBuilder({ onClose, onSave, editingGuard }: { onClose: () =>
                                 ))}
                               </optgroup>
                             )}
-                            <optgroup label="OpenRouter (uncensored)">
-                              <option value="openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition:free">
-                                🐬 Dolphin Mistral 24B (Free, Uncensored)
-                              </option>
-                              <option value="openrouter/google/gemma-3-12b-it:free">Gemma 3 12B (Free)</option>
-                              <option value="openrouter/mistralai/mistral-small-3.1-24b-instruct:free">Mistral Small 3.1 24B (Free)</option>
-                              <option value="openrouter/qwen/qwen3-4b:free">Qwen 3 4B (Free)</option>
-                              <option value="openrouter/deepseek/deepseek-r1-0528:free">DeepSeek R1 (Free)</option>
-                              <option value="openrouter/nousresearch/hermes-3-llama-3.1-405b:free">Hermes 3 405B (Free)</option>
+                            <optgroup label="OpenRouter">
                               <option value="openrouter/llama-3.1-8b-instruct">Llama 3.1 8B</option>
                               <option value="openrouter/llama-3.1-70b-instruct">Llama 3.1 70B</option>
                               <option value="openrouter/mistral-7b-instruct">Mistral 7B</option>
-                              <option value="openrouter/dolphin-2.9.1-llama-3.1-8b">Dolphin 2.9.1 Llama 3.1 8B</option>
-                              <option value="openrouter/gemma-2-9b-it">Gemma 2 9B</option>
-                              <option value="openrouter/deepseek-chat">DeepSeek Chat</option>
+                              <option value="openrouter/qwen-2.5-72b-instruct">Qwen 2.5 72B</option>
+                              <option value="openrouter/neverskip-nemotron-70b-instruct">Nemotron 70B</option>
                             </optgroup>
                             <optgroup label="OpenAI">
                               <option value="openai/gpt-4o">GPT-4o</option>
                               <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
+                              <option value="openai/gpt-4-turbo">GPT-4 Turbo</option>
                               <option value="openai/gpt-3.5-turbo">GPT-3.5 Turbo</option>
                             </optgroup>
-                            <optgroup label="Anthropic">
-                              <option value="anthropic/claude-3-5-sonnet">Claude 3.5 Sonnet</option>
-                              <option value="anthropic/claude-3-haiku">Claude 3 Haiku</option>
-                            </optgroup>
-                            <optgroup label="Google Gemini">
-                              <option value="gemini/gemini-1.5-pro">Gemini 1.5 Pro</option>
-                              <option value="gemini/gemini-1.5-flash">Gemini 1.5 Flash</option>
+                            <optgroup label="Abliteration">
+                              <option value="abliteration/abliterated-model">Abliterated Model</option>
                             </optgroup>
                           </select>
                           <div className="mt-2 ml-1 space-y-1">
@@ -1051,15 +1043,14 @@ function ArchitectureBuilder({ onClose, onSave, editingGuard }: { onClose: () =>
                         </div>
 
                         {/* API Key Input */}
-                        {layer.llmModel.startsWith("openrouter/") || layer.llmModel.startsWith("openai/") || layer.llmModel.startsWith("anthropic/") || layer.llmModel.startsWith("gemini/") ? (
+                        {layer.llmModel.startsWith("openrouter/") || layer.llmModel.startsWith("openai/") || layer.llmModel.startsWith("abliteration/") ? (
                           <div>
                             <label className="text-xs text-gray-400 block mb-2 ml-1 flex items-center gap-2">
                               <Key className="w-3 h-3" />
                               API Key
                               {layer.llmModel.startsWith("openrouter/") && <span className="text-xs text-blue-400">(OpenRouter)</span>}
                               {layer.llmModel.startsWith("openai/") && <span className="text-xs text-green-400">(OpenAI)</span>}
-                              {layer.llmModel.startsWith("anthropic/") && <span className="text-xs text-orange-400">(Anthropic)</span>}
-                              {layer.llmModel.startsWith("gemini/") && <span className="text-xs text-yellow-400">(Gemini)</span>}
+                              {layer.llmModel.startsWith("abliteration/") && <span className="text-xs text-amber-400">(Abliteration)</span>}
                             </label>
                             <input
                               type="password"
@@ -1070,11 +1061,11 @@ function ArchitectureBuilder({ onClose, onSave, editingGuard }: { onClose: () =>
                                   l.id === layer.id ? { ...l, apiKey: value } : l
                                 ));
                               }}
-                              placeholder={layer.llmModel.startsWith("openrouter/") ? "sk-or-..." : layer.llmModel.startsWith("openai/") ? "sk-..." : layer.llmModel.startsWith("anthropic/") ? "sk-ant-..." : "AIza..."}
+                              placeholder={layer.llmModel.startsWith("openrouter/") ? "sk-or-..." : layer.llmModel.startsWith("openai/") ? "sk-..." : "ak_..."}
                               className="w-full bg-black/40 border border-white/20 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-green-500/50 backdrop-blur-sm placeholder:text-gray-600"
                             />
                             <p className="text-xs text-gray-500 mt-1 ml-1">
-                              🔒 API key is stored securely in your browser and sent only with scan requests
+                              🔒 Enter key and click Save to store. Leave blank to keep existing key. Required for evaluations.
                             </p>
                           </div>
                         ) : null}
@@ -1277,6 +1268,7 @@ function EvaluationMode({
   const { selectedGuard, selectedGuard2, results, compareResults, compareAllResults, hfToken, showTokenInput, compareMode, expandedCard, datasetPreview, showDatasetPreview, previewLoading, showAllDifferences, maxSamples } = state;
   const [evaluating, setEvaluating] = useState(false);
   const [evaluatingAll, setEvaluatingAll] = useState(false);
+  const [showIndividualDatasets, setShowIndividualDatasets] = useState(false);
   const resultsRef = useRef<HTMLDivElement>(null);
   
   const setSelectedGuard = (id: number | null) => setState(s => ({ ...s, selectedGuard: id }));
@@ -1284,7 +1276,10 @@ function EvaluationMode({
   const setResults = (r: any) => setState(s => ({ ...s, results: r }));
   const setCompareResults = (r: any) => setState(s => ({ ...s, compareResults: r }));
   const setCompareAllResults = (r: any) => setState(s => ({ ...s, compareAllResults: r }));
-  const setHfToken = (t: string) => setState(s => ({ ...s, hfToken: t }));
+  const setHfToken = (t: string) => {
+    if (typeof window !== "undefined") try { localStorage.setItem(HF_TOKEN_STORAGE_KEY, t); } catch (_) {}
+    setState(s => ({ ...s, hfToken: t }));
+  };
   const setShowTokenInput = (show: boolean) => setState(s => ({ ...s, showTokenInput: show }));
   const setCompareMode = (mode: boolean) => setState(s => ({ ...s, compareMode: mode }));
   const setExpandedCard = (card: string | null) => setState(s => ({ ...s, expandedCard: card }));
@@ -1311,11 +1306,20 @@ function EvaluationMode({
     }
   };
 
+  const DATASET_DISPLAY_NAMES: Record<string, string> = {
+    notInject: "Benign / Non-Injection",
+    StrongREJECT: "Jailbreak / Adversarial Attacks",
+    vectorAttacks: "Vector & Obfuscation Attacks",
+    ProtectAI: "Prompt Injection (Mixed)",
+  };
+  const getDatasetDisplayName = (key: string) => DATASET_DISPLAY_NAMES[key] ?? key;
+
   const evaluationSets = [
     {
       id: 1,
       name: "notInject",
-      description: "Dataset for testing non-injection scenarios and benign inputs",
+      displayName: "Benign / Non-Injection",
+      description: "Benign prompts with no injection intent (safe user queries)",
       hfDataset: "leolee99/NotInject",
       count: "339",
       color: "from-emerald-500/20 to-green-500/20",
@@ -1325,7 +1329,8 @@ function EvaluationMode({
     {
       id: 2,
       name: "StrongREJECT",
-      description: "Adversarial jailbreak attacks for testing prompt injection detection",
+      displayName: "Jailbreak / Adversarial Attacks",
+      description: "Adversarial jailbreak and refusal-breaking attack prompts",
       hfDataset: "walledai/StrongREJECT",
       count: "300+",
       color: "from-red-500/20 to-rose-500/20",
@@ -1335,7 +1340,8 @@ function EvaluationMode({
     {
       id: 3,
       name: "vectorAttacks",
-      description: "Vector/obfuscation attacks: spaces, leetspeak, Unicode, adversarial suffixes",
+      displayName: "Vector & Obfuscation Attacks",
+      description: "Document/image-context, obfuscation, encoding, and injection-style attacks",
       hfDataset: "Local (classifier-training/datasets)",
       count: "601",
       color: "from-amber-500/20 to-orange-500/20",
@@ -1345,7 +1351,8 @@ function EvaluationMode({
     {
       id: 4,
       name: "ProtectAI",
-      description: "Mixed benign + injection validation set (3,227 samples)",
+      displayName: "Prompt Injection (Mixed)",
+      description: "Mixed benign + malicious prompt injection validation set",
       hfDataset: "protectai/prompt-injection-validation",
       count: "3,227",
       color: "from-violet-500/20 to-purple-500/20",
@@ -1380,7 +1387,7 @@ function EvaluationMode({
     setEvaluating(true);
     setResults(null);
     setCompareResults(null);
-    
+    setCompareAllResults(null);  // Avoid stale compare-all overlapping with single-dataset eval/compare
     try {
       if (compareMode && selectedGuard2) {
         // Compare two guardrails
@@ -1394,7 +1401,7 @@ function EvaluationMode({
           guard_id_1: selectedGuard,
           guard_id_2: selectedGuard2,
           dataset_name: datasetName,
-          max_samples: maxSamples || 10000,
+          max_samples: maxSamples,
           hf_token: hfToken || null
         });
         setCompareResults(res.data);
@@ -1411,7 +1418,7 @@ function EvaluationMode({
         const res = await api.post("/evaluate", {
           guard_id: selectedGuard,
           dataset_name: datasetName,
-          max_samples: maxSamples || 10000,
+          max_samples: maxSamples,
           hf_token: hfToken || null
         });
         setResults(res.data);
@@ -1448,11 +1455,12 @@ function EvaluationMode({
     }
     setEvaluatingAll(true);
     setCompareAllResults(null);
+    setCompareResults(null);  // Avoid stale single-dataset comparison overlapping with compare-all
     try {
       const res = await api.post("/compare-all", {
         guard_id_1: selectedGuard,
         guard_id_2: selectedGuard2,
-        max_samples_per_dataset: maxSamples && maxSamples > 0 ? Math.min(1000, maxSamples) : 1000,
+        max_samples_per_dataset: maxSamples,
         hf_token: hfToken
       });
       setCompareAllResults(res.data);
@@ -1631,7 +1639,7 @@ function EvaluationMode({
                 {hfToken && (
                   <div className="mt-2 text-xs text-green-400 flex items-center gap-1">
                     <CheckCircle className="w-3 h-3" />
-                    Token set (will be used for evaluation)
+                    Token saved locally (persists across sessions)
                   </div>
                 )}
               </div>
@@ -1652,11 +1660,12 @@ function EvaluationMode({
             onChange={(e) => setState(s => ({ ...s, maxSamples: parseInt(e.target.value, 10) }))}
             className="bg-black/30 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white focus:border-blue-500/50 outline-none"
           >
+            <option value="0">Full dataset</option>
+            <option value="100">100 samples</option>
             <option value="500">500 samples</option>
             <option value="1000">1,000 samples</option>
             <option value="2000">2,000 samples</option>
             <option value="5000">5,000 samples</option>
-            <option value="0">Full dataset</option>
           </select>
         </div>
       </div>
@@ -1675,7 +1684,7 @@ function EvaluationMode({
             
             <div className="relative">
               <div className="flex justify-between items-start mb-4">
-                <h3 className="text-xl font-bold text-white">{set.name}</h3>
+                <h3 className="text-xl font-bold text-white">{set.displayName ?? set.name}</h3>
                 <div className="flex flex-col items-end gap-2">
                   <span className="px-3 py-1.5 bg-black/30 backdrop-blur-sm rounded-full text-xs font-mono border border-white/20">
                     {set.count} samples
@@ -1693,7 +1702,7 @@ function EvaluationMode({
               <div className="flex gap-3">
                 <button
                   onClick={() => runEvaluation(set.name)}
-                  disabled={!set.available || !selectedGuard || (compareMode && !selectedGuard2) || evaluating}
+                  disabled={!set.available || !selectedGuard || (compareMode && (!selectedGuard2 || selectedGuard === selectedGuard2)) || evaluating}
                   className="flex-1 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed backdrop-blur-sm px-4 py-2.5 rounded-xl font-medium text-sm transition-all hover:scale-105 active:scale-95 border border-white/20"
                 >
                   {evaluating ? "Running..." : compareMode ? "Compare Guardrails" : "Run Evaluation"}
@@ -1728,31 +1737,53 @@ function EvaluationMode({
             )}
           </h3>
 
-          {/* Performance Graph - Individual Dataset (vertical bars, muted) */}
+          {/* Performance Metrics - Horizontal bars, dissertation-ready */}
           <div className="mb-6">
-            <h4 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Performance Metrics</h4>
-            <p className="text-xs text-gray-500 mb-3">Taller bar = better. FPR inverted (lower = taller).</p>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Performance Metrics</h4>
+              <button
+                onClick={async () => {
+                  const metrics = [
+                    { name: "Accuracy", v: results.accuracy, unit: "%" },
+                    { name: "Precision", v: results.precision, unit: "%" },
+                    { name: "Recall", v: results.recall, unit: "%" },
+                    { name: "F1 Score", v: (results.f1_score ?? 0) / 100, unit: "" },
+                    { name: "FPR", v: results.false_positive_rate, unit: "%" },
+                  ];
+                  const text = metrics.map(m => `${m.name}: ${typeof m.v === "number" && m.v < 1 && m.v > 0 ? m.v.toFixed(4) : m.v}${m.unit}`).join("\n");
+                  await navigator.clipboard.writeText(text);
+                  alert("Copied metrics to clipboard");
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg border border-white/10"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                Copy
+              </button>
+            </div>
+            <div className="space-y-4">
               {[
                 { label: "Accuracy", key: "accuracy", unit: "%", lowerIsBetter: false },
-                { label: "F1", key: "f1_score", unit: "", lowerIsBetter: false },
-                { label: "Recall", key: "recall", unit: "%", lowerIsBetter: false },
                 { label: "Precision", key: "precision", unit: "%", lowerIsBetter: false },
-                { label: "FPR", key: "false_positive_rate", unit: "%", lowerIsBetter: true }
+                { label: "Recall", key: "recall", unit: "%", lowerIsBetter: false },
+                { label: "F1 Score", key: "f1_score", unit: "%", lowerIsBetter: false },
+                { label: "False Positive Rate", key: "false_positive_rate", unit: "%", lowerIsBetter: true },
               ].map((m) => {
                 const v = results[m.key] ?? 0;
                 const lowerIsBetter = m.lowerIsBetter ?? false;
                 const barVal = lowerIsBetter ? Math.max(0, 100 - v) : v;
-                const h = Math.max(4, (barVal / 100) * 60);
+                const w = (barVal / 100) * 100;
                 return (
-                  <div key={m.key} className="flex flex-col items-center">
-                    <span className="text-xs text-gray-500 mb-1">{m.label}{lowerIsBetter ? " ↓" : ""}</span>
-                    <div className="flex items-end justify-center w-full" style={{ height: 72 }}>
+                  <div key={m.key} className="space-y-1">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-gray-400">{m.label}{lowerIsBetter ? " (↓ lower better)" : ""}</span>
+                      <span className="font-mono font-semibold text-white">{v}{m.unit}</span>
+                    </div>
+                    <div className="h-6 bg-white/5 rounded-lg overflow-hidden">
                       <div
-                        className={`w-full max-w-[48px] rounded-t flex items-end justify-center min-h-[4px] ${lowerIsBetter ? "bg-amber-600/50" : "bg-slate-500/60"}`}
-                        style={{ height: h }}
+                        className={`h-full rounded-l transition-all flex items-center justify-end pr-2 ${lowerIsBetter ? "bg-amber-500/50" : "bg-slate-500/60"}`}
+                        style={{ width: `${w}%` }}
                       >
-                        {h > 16 && <span className="text-[10px] font-medium text-white/90 pb-0.5">{v}{m.unit}</span>}
+                        {w > 20 && <span className="text-[10px] font-medium text-white">{v}{m.unit}</span>}
                       </div>
                     </div>
                   </div>
@@ -1830,24 +1861,47 @@ function EvaluationMode({
             <div className="mb-6 bg-red-500/5 backdrop-blur-sm border border-red-500/20 rounded-xl p-4 animate-slide-up">
               <h4 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-3 flex items-center gap-2">
                 <XCircle className="w-4 h-4" />
-                Incorrect Classifications ({results.incorrect_samples.length})
+                Misclassified Samples ({results.incorrect_samples.length})
               </h4>
-              <div className="space-y-2 max-h-96 overflow-y-auto">
-                {results.incorrect_samples.map((sample: any) => (
-                  <div key={sample.id} className="bg-black/30 backdrop-blur-sm border border-red-500/20 rounded-lg p-3 flex justify-between items-start gap-4">
-                    <div className="flex-1">
-                      <div className="text-xs text-gray-500 mb-1">Sample #{sample.id}</div>
-                      <div className="text-sm text-gray-300 font-mono">{sample.prompt}</div>
-                    </div>
-                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                      <span className="text-xs text-gray-500">{sample.latency_ms}ms</span>
-                      <span className="px-2 py-1 rounded-lg text-xs font-bold bg-red-500/20 text-red-300 border border-red-500/30">
-                        {sample.verdict}
-                      </span>
-                    </div>
+              {(() => {
+                const fpSamples = results.incorrect_samples.filter((s: any) => s.error_type === "fp");
+                const fnSamples = results.incorrect_samples.filter((s: any) => s.error_type === "fn");
+                const otherSamples = results.incorrect_samples.filter((s: any) => !s.error_type);
+                return (
+                  <div className="space-y-4">
+                    {fpSamples.length > 0 && (
+                      <div>
+                        <div className="text-xs font-semibold text-red-400 mb-2">FP — Benign wrongly blocked ({fpSamples.length})</div>
+                        <div className="space-y-2 max-h-48 overflow-y-auto">
+                          {fpSamples.map((sample: any) => (
+                            <div key={sample.id} className="bg-black/30 rounded-lg p-2 text-xs font-mono text-gray-300 break-words">{sample.prompt}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {fnSamples.length > 0 && (
+                      <div>
+                        <div className="text-xs font-semibold text-orange-400 mb-2">FN — Malicious missed ({fnSamples.length})</div>
+                        <div className="space-y-2 max-h-48 overflow-y-auto">
+                          {fnSamples.map((sample: any) => (
+                            <div key={sample.id} className="bg-black/30 rounded-lg p-2 text-xs font-mono text-gray-300 break-words">{sample.prompt}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {otherSamples.length > 0 && (
+                      <div>
+                        <div className="text-xs font-semibold text-gray-400 mb-2">Other ({otherSamples.length})</div>
+                        <div className="space-y-2 max-h-48 overflow-y-auto">
+                          {otherSamples.map((sample: any) => (
+                            <div key={sample.id} className="bg-black/30 rounded-lg p-2 text-xs font-mono text-gray-300 break-words">{sample.prompt}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                ))}
-              </div>
+                );
+              })()}
             </div>
           )}
 
@@ -1873,16 +1927,25 @@ function EvaluationMode({
                   <span className="font-mono font-semibold text-blue-400">{results.confusion_matrix.tp}</span>
                 </div>
               </div>
-              {results.dataset_name === "vectorAttacks" && results.by_attack_type && Object.keys(results.by_attack_type).length > 0 && (
+              {results.by_attack_type && Object.keys(results.by_attack_type).length > 0 && (
                 <div className="mt-4 pt-4 border-t border-white/10">
-                  <h5 className="text-xs font-semibold text-amber-400/90 uppercase tracking-wider mb-2">Attack type breakdown</h5>
-                  <div className="space-y-1.5 text-sm">
-                    {Object.entries(results.by_attack_type).map(([atype, data]: [string, any]) => (
-                      <div key={atype} className="flex justify-between items-center py-1">
-                        <span className="text-gray-400 capitalize">{atype}</span>
-                        <span><span className="text-orange-400">{data.allowed} allowed</span> · <span className="text-green-400">{data.blocked} blocked</span> <span className="text-gray-500">({data.total})</span></span>
-                      </div>
-                    ))}
+                  <h5 className="text-xs font-semibold text-amber-400/90 uppercase tracking-wider mb-2">Detection Rate by Attack Type</h5>
+                  <div className="space-y-2 text-sm">
+                    {Object.entries(results.by_attack_type).filter(([_, data]: [string, any]) => (data.total ?? ((data.allowed ?? 0) + (data.blocked ?? 0))) > 0).map(([atype, data]: [string, any]) => {
+                      const total = data.total ?? ((data.allowed ?? 0) + (data.blocked ?? 0));
+                      const rate = total > 0 ? (data.blocked / total * 100) : 0;
+                      return (
+                        <div key={atype} className="space-y-1">
+                          <div className="flex justify-between text-xs">
+                            <span className="text-gray-300 capitalize font-medium">{atype.replace("_", " ")}</span>
+                            <span className="text-gray-500 font-mono">{data.blocked}/{total} blocked ({rate.toFixed(1)}%)</span>
+                          </div>
+                          <div className="h-4 bg-white/5 rounded overflow-hidden">
+                            <div className="h-full rounded-l bg-slate-500/60" style={{ width: `${rate}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1931,6 +1994,11 @@ function EvaluationMode({
             <Shield className="w-6 h-6 text-purple-400" />
             Comparison Results
           </h3>
+          {compareResults.guard1?.accuracy === compareResults.guard2?.accuracy && compareResults.total_samples > 0 && (
+            <div className="mb-4 px-4 py-2 bg-amber-500/10 border border-amber-500/30 rounded-lg text-sm text-amber-200/90">
+              Both guardrails have identical accuracy. This can happen if they use the same config (classifier + LLM) or produce the same verdicts on all samples. Select two differently configured guardrails to see meaningful differences.
+            </div>
+          )}
           
           {/* Guard Names Header - muted colors */}
           <div className="grid grid-cols-2 gap-4 mb-6">
@@ -1944,60 +2012,89 @@ function EvaluationMode({
             </div>
           </div>
 
-          {/* Vertical grouped bar chart - fixed 0-100 scale, proportional heights */}
+          {/* Horizontal grouped bar chart - dissertation-ready, 0-100 scale */}
           <div className="mb-6">
-            <h4 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
-              Performance on {compareResults.dataset_name}
-            </h4>
-            <p className="text-xs text-gray-500 mb-4">Taller bar = better. FPR: lower = taller.</p>
-            <div className="flex items-end justify-around gap-4 py-4 px-2" style={{ minHeight: 180 }}>
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+                Performance on {getDatasetDisplayName(compareResults.dataset_name)}
+              </h4>
+              <button
+                onClick={async () => {
+                  const g1 = compareResults.guard1?.guard_name || "Guard 1";
+                  const g2 = compareResults.guard2?.guard_name || "Guard 2";
+                  const metrics = [
+                    { name: "Accuracy", key: "accuracy", unit: "%", g1: compareResults.guard1?.accuracy ?? 0, g2: compareResults.guard2?.accuracy ?? 0 },
+                    { name: "Precision", key: "precision", unit: "%", g1: compareResults.guard1?.precision ?? 0, g2: compareResults.guard2?.precision ?? 0 },
+                    { name: "Recall", key: "recall", unit: "%", g1: compareResults.guard1?.recall ?? 0, g2: compareResults.guard2?.recall ?? 0 },
+                    { name: "F1 Score", key: "f1_score", unit: "%", g1: compareResults.guard1?.f1_score ?? 0, g2: compareResults.guard2?.f1_score ?? 0 },
+                    { name: "FPR", key: "false_positive_rate", unit: "%", g1: compareResults.guard1?.false_positive_rate ?? 0, g2: compareResults.guard2?.false_positive_rate ?? 0 },
+                  ];
+                  const markdown = `| Metric | ${g1} | ${g2} | Δ |\n|--------|------|------|---|\n` + metrics.map(m => {
+                    const d = (m.g1 - m.g2).toFixed(2);
+                    const diffStr = parseFloat(d) > 0 ? `+${d}` : d;
+                    return `| ${m.name} | ${m.g1}${m.unit} | ${m.g2}${m.unit} | ${diffStr} |`;
+                  }).join("\n");
+                  await navigator.clipboard.writeText(markdown);
+                  alert("Copied to clipboard (Markdown table format)");
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 transition-all"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                Copy as Markdown
+              </button>
+            </div>
+            <div className="space-y-5">
               {[
                 { label: "Accuracy", key: "accuracy", unit: "%", lowerIsBetter: false },
+                { label: "Precision", key: "precision", unit: "%", lowerIsBetter: false },
                 { label: "Recall", key: "recall", unit: "%", lowerIsBetter: false },
-                { label: "F1", key: "f1_score", unit: "", lowerIsBetter: false },
-                { label: "FPR", key: "false_positive_rate", unit: "%", lowerIsBetter: true }
+                { label: "F1 Score", key: "f1_score", unit: "%", lowerIsBetter: false },
+                { label: "False Positive Rate", key: "false_positive_rate", unit: "%", lowerIsBetter: true },
               ].map((m) => {
                 const v1 = compareResults.guard1?.[m.key] ?? 0;
                 const v2 = compareResults.guard2?.[m.key] ?? 0;
                 const lowerIsBetter = m.lowerIsBetter ?? false;
-                const d1 = lowerIsBetter ? Math.max(0, 100 - v1) : v1;
-                const d2 = lowerIsBetter ? Math.max(0, 100 - v2) : v2;
+                const display1 = lowerIsBetter ? Math.max(0, 100 - v1) : v1;
+                const display2 = lowerIsBetter ? Math.max(0, 100 - v2) : v2;
                 const winner1 = lowerIsBetter ? v1 < v2 : v1 > v2;
                 const winner2 = lowerIsBetter ? v2 < v1 : v2 > v1;
-                const barHeight = 120;
-                const h1 = Math.max(4, (d1 / 100) * barHeight);
-                const h2 = Math.max(4, (d2 / 100) * barHeight);
-                const diff = Math.abs(v1 - v2);
-                const diffStr = diff > 0 ? (v1 > v2 ? `+${diff.toFixed(1)}` : `−${diff.toFixed(1)}`) : "—";
+                const maxVal = Math.max(display1, display2, 1);
+                const w1 = (display1 / 100) * 100;
+                const w2 = (display2 / 100) * 100;
                 return (
-                  <div key={m.key} className="flex flex-col items-center flex-1 min-w-0">
-                    <div className="text-xs text-gray-500 mb-2 text-center">{m.label}{lowerIsBetter ? " ↓" : ""}</div>
-                    <div className="flex items-end justify-center gap-2 w-full" style={{ height: barHeight + 48 }}>
-                      <div className="flex flex-col items-center flex-1 max-w-[70px]">
+                  <div key={m.key} className="space-y-1.5">
+                    <div className="flex justify-between items-baseline">
+                      <span className="text-sm font-medium text-gray-300">{m.label}{lowerIsBetter ? " (↓ lower better)" : ""}</span>
+                      <span className="text-xs text-gray-500 font-mono">
+                        {compareResults.guard1?.guard_name}: {v1}{m.unit} · {compareResults.guard2?.guard_name}: {v2}{m.unit}
+                        {Math.abs(v1 - v2) > 0 && (
+                          <span className={winner1 ? "text-emerald-400 ml-1" : "text-violet-400 ml-1"}>
+                            (Δ {(v1 - v2).toFixed(2)}{m.unit})
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <div className="flex-1 h-7 bg-white/5 rounded-lg overflow-hidden flex">
                         <div
-                          className={`w-full rounded-t transition-all flex flex-col items-center justify-end min-h-[4px] ${winner1 ? "ring-2 ring-emerald-400 shadow-lg shadow-emerald-500/30" : "opacity-55"}`}
-                          style={{ height: h1, backgroundColor: winner1 ? "rgba(14, 165, 233, 0.7)" : "rgba(14, 165, 233, 0.4)" }}
-                          title={`${compareResults.guard1?.guard_name}: ${v1}${m.unit}`}
+                          className={`h-full rounded-l transition-all flex items-center justify-end pr-2 min-w-0 ${winner1 ? "ring-1 ring-emerald-400/60" : ""}`}
+                          style={{ width: `${w1}%`, backgroundColor: winner1 ? "rgba(14, 165, 233, 0.65)" : "rgba(14, 165, 233, 0.35)" }}
                         >
-                          {h1 > 22 && <span className="text-[10px] font-bold text-white pb-1">{v1}{m.unit}</span>}
+                          {w1 > 15 && <span className="text-[10px] font-semibold text-white truncate">{v1}{m.unit}</span>}
                         </div>
-                        <span className="text-[10px] text-sky-300/80 mt-1">G1</span>
-                        {winner1 && <span className="text-[9px] font-semibold text-emerald-400 mt-0.5">Better</span>}
                       </div>
-                      <div className="flex flex-col items-center justify-end pb-6">
-                        <span className="text-[10px] font-mono text-gray-500">{diffStr}{m.unit}</span>
-                      </div>
-                      <div className="flex flex-col items-center flex-1 max-w-[70px]">
+                      <div className="flex-1 h-7 bg-white/5 rounded-lg overflow-hidden flex">
                         <div
-                          className={`w-full rounded-t transition-all flex flex-col items-center justify-end min-h-[4px] ${winner2 ? "ring-2 ring-emerald-400 shadow-lg shadow-emerald-500/30" : "opacity-55"}`}
-                          style={{ height: h2, backgroundColor: winner2 ? "rgba(139, 92, 246, 0.7)" : "rgba(139, 92, 246, 0.4)" }}
-                          title={`${compareResults.guard2?.guard_name}: ${v2}${m.unit}`}
+                          className={`h-full rounded-l transition-all flex items-center justify-end pr-2 min-w-0 ${winner2 ? "ring-1 ring-emerald-400/60" : ""}`}
+                          style={{ width: `${w2}%`, backgroundColor: winner2 ? "rgba(139, 92, 246, 0.65)" : "rgba(139, 92, 246, 0.35)" }}
                         >
-                          {h2 > 22 && <span className="text-[10px] font-bold text-white pb-1">{v2}{m.unit}</span>}
+                          {w2 > 15 && <span className="text-[10px] font-semibold text-white truncate">{v2}{m.unit}</span>}
                         </div>
-                        <span className="text-[10px] text-violet-300/80 mt-1">G2</span>
-                        {winner2 && <span className="text-[9px] font-semibold text-emerald-400 mt-0.5">Better</span>}
                       </div>
+                    </div>
+                    <div className="flex gap-2 text-[10px] text-gray-500">
+                      <span className="flex-1 text-sky-400/80">{compareResults.guard1?.guard_name}</span>
+                      <span className="flex-1 text-violet-400/80">{compareResults.guard2?.guard_name}</span>
                     </div>
                   </div>
                 );
@@ -2005,28 +2102,47 @@ function EvaluationMode({
             </div>
           </div>
 
-          {/* Performance Metrics - Compact Horizontal Table */}
+          {/* Performance Metrics - Dissertation-ready table with copy */}
           <div className="mb-6 overflow-hidden rounded-xl border border-white/10">
-            <div className="px-5 py-3 bg-white/5 border-b border-white/10 text-xs text-gray-500">
-              Hover metric names for definitions. Latency = total evaluation time ÷ samples (ms per sample).
+            <div className="px-5 py-3 bg-white/5 border-b border-white/10 flex justify-between items-center">
+              <span className="text-xs text-gray-500">Accuracy=(TP+TN)/N · Precision=TP/(TP+FP) · Recall=TP/(TP+FN) · F1=2PR/(P+R) · FPR=FP/(FP+TN)</span>
+              <button
+                onClick={async () => {
+                  const g1 = compareResults.guard1?.guard_name || "Guard 1";
+                  const g2 = compareResults.guard2?.guard_name || "Guard 2";
+                  const rows = [
+                    ["Accuracy (%)", compareResults.guard1?.accuracy ?? 0, compareResults.guard2?.accuracy ?? 0],
+                    ["Precision (%)", compareResults.guard1?.precision ?? 0, compareResults.guard2?.precision ?? 0],
+                    ["Recall (%)", compareResults.guard1?.recall ?? 0, compareResults.guard2?.recall ?? 0],
+                    ["F1 Score", (compareResults.guard1?.f1_score ?? 0) / 100, (compareResults.guard2?.f1_score ?? 0) / 100],
+                    ["FPR (%)", compareResults.guard1?.false_positive_rate ?? 0, compareResults.guard2?.false_positive_rate ?? 0],
+                  ];
+                  const latex = `\\begin{tabular}{lcc}\n\\toprule\nMetric & ${g1.replace(/&/g, "\\&")} & ${g2.replace(/&/g, "\\&")} \\\\\n\\midrule\n` + rows.map(([name, v1, v2]) => `${name} & ${typeof v1 === "number" && v1 < 1 ? v1.toFixed(4) : v1} & ${typeof v2 === "number" && v2 < 1 ? v2.toFixed(4) : v2} \\\\`).join("\n") + `\n\\bottomrule\n\\end{tabular}`;
+                  await navigator.clipboard.writeText(latex);
+                  alert("Copied LaTeX table to clipboard");
+                }}
+                className="px-2 py-1 text-[10px] font-medium text-gray-400 hover:text-white bg-white/5 rounded border border-white/10"
+              >
+                Copy LaTeX
+              </button>
             </div>
             <table className="w-full">
               <thead>
                 <tr className="bg-white/5">
                   <th className="text-left px-5 py-4 text-sm font-semibold text-gray-400 uppercase tracking-wider">Metric</th>
                   <th className="text-center px-5 py-4 text-sm font-semibold text-sky-300/90 uppercase tracking-wider">{compareResults.guard1?.guard_name}</th>
-                  <th className="text-center px-5 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider">Diff</th>
+                  <th className="text-center px-5 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider">Δ</th>
                   <th className="text-center px-5 py-4 text-sm font-semibold text-violet-300/90 uppercase tracking-wider">{compareResults.guard2?.guard_name}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
                 {[
-                  { label: "Accuracy", key: "accuracy", unit: "%", desc: "Correct verdicts / total" },
-                  { label: "F1 Score", key: "f1_score", unit: "", desc: "Harmonic mean of precision & recall" },
-                  { label: "False Positive Rate", key: "false_positive_rate", unit: "%", desc: "Benign wrongly blocked (lower is better)" },
-                  { label: "Precision", key: "precision", unit: "%", desc: "Blocked items that were actually malicious" },
-                  { label: "Recall", key: "recall", unit: "%", desc: "Malicious items correctly blocked" },
-                  { label: "Latency per sample", key: "avg_latency_ms", unit: "ms", desc: "Total eval time ÷ samples (lower is better)" }
+                  { label: "Accuracy", key: "accuracy", unit: "%", desc: "(TP+TN)/total" },
+                  { label: "Precision", key: "precision", unit: "%", desc: "TP/(TP+FP)" },
+                  { label: "Recall", key: "recall", unit: "%", desc: "TP/(TP+FN)" },
+                  { label: "F1 Score", key: "f1_score", unit: "%", desc: "2·P·R/(P+R)" },
+                  { label: "False Positive Rate", key: "false_positive_rate", unit: "%", desc: "FP/(FP+TN)" },
+                  { label: "Latency per sample", key: "avg_latency_ms", unit: " ms", desc: "Total time ÷ N" }
                 ].map((metric) => {
                   const val1 = compareResults.guard1?.[metric.key] || 0;
                   const val2 = compareResults.guard2?.[metric.key] || 0;
@@ -2063,77 +2179,140 @@ function EvaluationMode({
             </table>
           </div>
 
-          {/* Performance by Label — single consolidated table (rates + counts) */}
-          <div className="mb-6">
-            <h4 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Performance by Label</h4>
-            <div className="rounded-xl border border-white/10 bg-white/5 overflow-hidden">
+          {/* Confusion Matrix + Label Performance + Attack Types — compact grid */}
+          <div className="mb-6 space-y-4">
+            {/* Confusion matrix side-by-side */}
+            <div className="rounded-xl border border-white/10 overflow-hidden">
+              <div className="px-4 py-2 bg-white/5 border-b border-white/5">
+                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Confusion Matrix & Label Accuracy</span>
+              </div>
               <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-white/5 border-b border-white/10">
-                    <th className="text-left px-4 py-3 font-semibold text-gray-400">Metric</th>
-                    <th className="text-right px-4 py-3 font-semibold text-sky-300/90">{compareResults.guard1?.guard_name}</th>
-                    <th className="text-right px-4 py-3 font-semibold text-violet-300/90">{compareResults.guard2?.guard_name}</th>
-                  </tr>
-                </thead>
+                <thead><tr className="bg-white/5"><th className="text-left px-4 py-2 text-gray-500"></th><th className="text-center px-3 py-2 text-sky-300/90 text-xs">{compareResults.guard1?.guard_name}</th><th className="text-center px-3 py-2 text-violet-300/90 text-xs">{compareResults.guard2?.guard_name}</th></tr></thead>
                 <tbody className="divide-y divide-white/5">
-                  <tr className="hover:bg-white/5">
-                    <td className="px-4 py-2.5 text-gray-400">Benign: correctly allowed</td>
-                    <td className="px-4 py-2.5 text-right"><span className="font-mono font-semibold text-green-400">{compareResults.guard1?.by_label?.benign?.rate ?? 0}%</span> <span className="text-gray-500">({compareResults.guard1?.by_label?.benign?.correct ?? 0}/{compareResults.guard1?.by_label?.benign?.total ?? 0})</span></td>
-                    <td className="px-4 py-2.5 text-right"><span className="font-mono font-semibold text-green-400">{compareResults.guard2?.by_label?.benign?.rate ?? 0}%</span> <span className="text-gray-500">({compareResults.guard2?.by_label?.benign?.correct ?? 0}/{compareResults.guard2?.by_label?.benign?.total ?? 0})</span></td>
-                  </tr>
-                  <tr className="hover:bg-white/5">
-                    <td className="px-4 py-2.5 text-gray-400">Benign: wrongly blocked (false alarm)</td>
-                    <td className="px-4 py-2.5 text-right font-mono font-semibold text-red-400">{compareResults.guard1?.confusion_matrix?.fp ?? 0}</td>
-                    <td className="px-4 py-2.5 text-right font-mono font-semibold text-red-400">{compareResults.guard2?.confusion_matrix?.fp ?? 0}</td>
-                  </tr>
-                  <tr className="hover:bg-white/5">
-                    <td className="px-4 py-2.5 text-gray-400">Malicious: correctly blocked</td>
-                    <td className="px-4 py-2.5 text-right"><span className="font-mono font-semibold text-blue-400">{compareResults.guard1?.by_label?.malicious?.rate ?? 0}%</span> <span className="text-gray-500">({compareResults.guard1?.by_label?.malicious?.correct ?? 0}/{compareResults.guard1?.by_label?.malicious?.total ?? 0})</span></td>
-                    <td className="px-4 py-2.5 text-right"><span className="font-mono font-semibold text-blue-400">{compareResults.guard2?.by_label?.malicious?.rate ?? 0}%</span> <span className="text-gray-500">({compareResults.guard2?.by_label?.malicious?.correct ?? 0}/{compareResults.guard2?.by_label?.malicious?.total ?? 0})</span></td>
-                  </tr>
-                  <tr className="hover:bg-white/5">
-                    <td className="px-4 py-2.5 text-gray-400">Malicious: missed (attack allowed)</td>
-                    <td className="px-4 py-2.5 text-right font-mono font-semibold text-orange-400">{compareResults.guard1?.confusion_matrix?.fn ?? 0}</td>
-                    <td className="px-4 py-2.5 text-right font-mono font-semibold text-orange-400">{compareResults.guard2?.confusion_matrix?.fn ?? 0}</td>
-                  </tr>
+                  <tr><td className="px-4 py-1.5 text-gray-400 text-sm">TP (attacks blocked)</td><td className="text-center font-mono text-blue-400">{compareResults.guard1?.confusion_matrix?.tp ?? 0}</td><td className="text-center font-mono text-blue-400">{compareResults.guard2?.confusion_matrix?.tp ?? 0}</td></tr>
+                  <tr><td className="px-4 py-1.5 text-gray-400 text-sm">TN (benign allowed)</td><td className="text-center font-mono text-green-400">{compareResults.guard1?.confusion_matrix?.tn ?? 0}</td><td className="text-center font-mono text-green-400">{compareResults.guard2?.confusion_matrix?.tn ?? 0}</td></tr>
+                  <tr><td className="px-4 py-1.5 text-gray-400 text-sm">FP (benign wrongly blocked)</td><td className="text-center font-mono text-red-400">{compareResults.guard1?.confusion_matrix?.fp ?? 0}</td><td className="text-center font-mono text-red-400">{compareResults.guard2?.confusion_matrix?.fp ?? 0}</td></tr>
+                  <tr><td className="px-4 py-1.5 text-gray-400 text-sm">FN (attacks missed)</td><td className="text-center font-mono text-orange-400">{compareResults.guard1?.confusion_matrix?.fn ?? 0}</td><td className="text-center font-mono text-orange-400">{compareResults.guard2?.confusion_matrix?.fn ?? 0}</td></tr>
+                  {(compareResults.guard1?.by_label?.benign || compareResults.guard2?.by_label?.benign) && (
+                    <tr className="border-t border-white/10"><td className="px-4 py-1.5 text-emerald-400/80 text-sm">Benign correct rate</td><td className="text-center font-mono">{compareResults.guard1?.by_label?.benign?.rate ?? 0}% <span className="text-gray-500 text-xs">({compareResults.guard1?.by_label?.benign?.correct ?? 0}/{compareResults.guard1?.by_label?.benign?.total ?? 0})</span></td><td className="text-center font-mono">{compareResults.guard2?.by_label?.benign?.rate ?? 0}% <span className="text-gray-500 text-xs">({compareResults.guard2?.by_label?.benign?.correct ?? 0}/{compareResults.guard2?.by_label?.benign?.total ?? 0})</span></td></tr>
+                  )}
+                  {(compareResults.guard1?.by_label?.malicious || compareResults.guard2?.by_label?.malicious) && (
+                    <tr><td className="px-4 py-1.5 text-rose-400/80 text-sm">Malicious blocked rate</td><td className="text-center font-mono">{compareResults.guard1?.by_label?.malicious?.rate ?? 0}% <span className="text-gray-500 text-xs">({compareResults.guard1?.by_label?.malicious?.correct ?? 0}/{compareResults.guard1?.by_label?.malicious?.total ?? 0})</span></td><td className="text-center font-mono">{compareResults.guard2?.by_label?.malicious?.rate ?? 0}% <span className="text-gray-500 text-xs">({compareResults.guard2?.by_label?.malicious?.correct ?? 0}/{compareResults.guard2?.by_label?.malicious?.total ?? 0})</span></td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
 
-            {/* Attack type breakdown (vectorAttacks only): obfuscation vs vector allowed/blocked */}
-            {(compareResults.dataset_name === "vectorAttacks" && (compareResults.guard1?.by_attack_type || compareResults.guard2?.by_attack_type)) && (
-              <div className="mt-4 pt-4 border-t border-white/10">
-                <h5 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Attack type breakdown</h5>
-                <p className="text-xs text-gray-500 mb-3">Obfuscation = Unicode/leetspeak. Vector = spaced-character attacks.</p>
+            {/* Attack type breakdown (for ANY dataset that has it) */}
+            {(compareResults.guard1?.by_attack_type || compareResults.guard2?.by_attack_type) && (() => {
+              const allTypes = ["prompt_injection", "obfuscation", "vector", "encoding", "injection", "other"];
+              const hasTypes = allTypes.filter(t => (compareResults.guard1?.by_attack_type?.[t]?.total ?? 0) + (compareResults.guard2?.by_attack_type?.[t]?.total ?? 0) > 0);
+              if (hasTypes.length === 0) return null;
+              return (
+                <div className="rounded-xl border border-white/10 overflow-hidden">
+                  <div className="px-4 py-2 bg-white/5 border-b border-white/5">
+                    <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Detection Rate by Attack Type</span>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    {hasTypes.map((atype) => {
+                      const g1 = compareResults.guard1?.by_attack_type?.[atype] ?? { blocked: 0, total: 0, allowed: 0 };
+                      const g2 = compareResults.guard2?.by_attack_type?.[atype] ?? { blocked: 0, total: 0, allowed: 0 };
+                      const t1 = g1.total || ((g1.allowed ?? 0) + (g1.blocked ?? 0));
+                      const t2 = g2.total || ((g2.allowed ?? 0) + (g2.blocked ?? 0));
+                      const rate1 = t1 > 0 ? (g1.blocked / t1) * 100 : 0;
+                      const rate2 = t2 > 0 ? (g2.blocked / t2) * 100 : 0;
+                      const winner1 = rate1 > rate2;
+                      const winner2 = rate2 > rate1;
+                      return (
+                        <div key={atype} className="space-y-1">
+                          <div className="flex justify-between text-xs">
+                            <span className="text-gray-300 capitalize font-medium">{atype.replace("_", " ")}</span>
+                            <span className="text-gray-500 font-mono">{g1.blocked}/{t1} · {g2.blocked}/{t2}</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <div className="flex-1 h-5 bg-white/5 rounded overflow-hidden">
+                              <div className={`h-full rounded-l flex items-center justify-end pr-1 ${winner1 ? "ring-1 ring-emerald-400/50" : ""}`}
+                                style={{ width: `${rate1}%`, backgroundColor: winner1 ? "rgba(14, 165, 233, 0.65)" : "rgba(14, 165, 233, 0.35)" }}>
+                                {rate1 > 15 && <span className="text-[9px] font-semibold text-white">{rate1.toFixed(1)}%</span>}
+                              </div>
+                            </div>
+                            <div className="flex-1 h-5 bg-white/5 rounded overflow-hidden">
+                              <div className={`h-full rounded-l flex items-center justify-end pr-1 ${winner2 ? "ring-1 ring-emerald-400/50" : ""}`}
+                                style={{ width: `${rate2}%`, backgroundColor: winner2 ? "rgba(139, 92, 246, 0.65)" : "rgba(139, 92, 246, 0.35)" }}>
+                                {rate2 > 15 && <span className="text-[9px] font-semibold text-white">{rate2.toFixed(1)}%</span>}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Latency breakdown (if timing data available) */}
+            {(compareResults.guard1?.timing_breakdown || compareResults.guard2?.timing_breakdown) && (
+              <div className="rounded-xl border border-white/10 overflow-hidden">
+                <div className="px-4 py-2 bg-white/5 border-b border-white/5">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Latency Breakdown</span>
+                </div>
                 <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-white/5">
-                      <th className="text-left px-4 py-2 font-semibold text-gray-400">Type</th>
-                      <th className="text-right px-4 py-2 font-semibold text-sky-300/90">{compareResults.guard1?.guard_name}</th>
-                      <th className="text-right px-4 py-2 font-semibold text-violet-300/90">{compareResults.guard2?.guard_name}</th>
-                    </tr>
-                  </thead>
+                  <thead><tr className="bg-white/5"><th className="text-left px-4 py-2 text-gray-500 text-xs"></th><th className="text-center px-3 py-2 text-sky-300/90 text-xs">{compareResults.guard1?.guard_name}</th><th className="text-center px-3 py-2 text-violet-300/90 text-xs">{compareResults.guard2?.guard_name}</th></tr></thead>
                   <tbody className="divide-y divide-white/5">
-                    {["obfuscation", "vector", "other"].filter(t => (compareResults.guard1?.by_attack_type?.[t]?.total ?? 0) + (compareResults.guard2?.by_attack_type?.[t]?.total ?? 0) > 0).map((atype) => (
-                      <tr key={atype} className="hover:bg-white/5">
-                        <td className="px-4 py-2 text-gray-400 capitalize">{atype}</td>
-                        <td className="px-4 py-2 text-right">
-                          <span className="font-mono text-orange-400">{compareResults.guard1?.by_attack_type?.[atype]?.allowed ?? 0} allowed</span>
-                          <span className="text-gray-500 mx-1">·</span>
-                          <span className="font-mono text-green-400">{compareResults.guard1?.by_attack_type?.[atype]?.blocked ?? 0} blocked</span>
-                          <span className="text-gray-500 text-xs ml-1">({compareResults.guard1?.by_attack_type?.[atype]?.total ?? 0})</span>
-                        </td>
-                        <td className="px-4 py-2 text-right">
-                          <span className="font-mono text-orange-400">{compareResults.guard2?.by_attack_type?.[atype]?.allowed ?? 0} allowed</span>
-                          <span className="text-gray-500 mx-1">·</span>
-                          <span className="font-mono text-green-400">{compareResults.guard2?.by_attack_type?.[atype]?.blocked ?? 0} blocked</span>
-                          <span className="text-gray-500 text-xs ml-1">({compareResults.guard2?.by_attack_type?.[atype]?.total ?? 0})</span>
-                        </td>
-                      </tr>
+                    {[
+                      {l: "Classifier avg", k1: compareResults.guard1?.timing_breakdown?.classifier_avg_ms, k2: compareResults.guard2?.timing_breakdown?.classifier_avg_ms},
+                      {l: "LLM avg (grey-zone)", k1: compareResults.guard1?.timing_breakdown?.llm_avg_ms, k2: compareResults.guard2?.timing_breakdown?.llm_avg_ms},
+                      {l: "Overall per sample", k1: compareResults.guard1?.avg_latency_ms, k2: compareResults.guard2?.avg_latency_ms},
+                    ].filter(row => row.k1 != null || row.k2 != null).map(row => (
+                      <tr key={row.l}><td className="px-4 py-1.5 text-gray-400">{row.l}</td><td className="text-center font-mono text-sm">{row.k1 != null ? `${row.k1} ms` : "—"}</td><td className="text-center font-mono text-sm">{row.k2 != null ? `${row.k2} ms` : "—"}</td></tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+            )}
+
+            {/* Misclassified samples — compact expandable */}
+            {[
+              { guardKey: "guard1", name: compareResults.guard1?.guard_name, samples: compareResults.guard1?.incorrect_samples ?? [], borderColor: "border-sky-500/20" },
+              { guardKey: "guard2", name: compareResults.guard2?.guard_name, samples: compareResults.guard2?.incorrect_samples ?? [], borderColor: "border-violet-500/20" }
+            ].filter(g => g.samples.length > 0).length > 0 && (
+              <details className="rounded-xl border border-white/10 overflow-hidden">
+                <summary className="px-4 py-2.5 cursor-pointer hover:bg-white/5 text-sm text-gray-300 font-semibold">
+                  Misclassified Samples ({(compareResults.guard1?.incorrect_samples?.length ?? 0) + (compareResults.guard2?.incorrect_samples?.length ?? 0)} total)
+                </summary>
+                <div className="divide-y divide-white/5">
+                  {[
+                    { guardKey: "guard1", name: compareResults.guard1?.guard_name, samples: compareResults.guard1?.incorrect_samples ?? [], textClass: "text-sky-300/90" },
+                    { guardKey: "guard2", name: compareResults.guard2?.guard_name, samples: compareResults.guard2?.incorrect_samples ?? [], textClass: "text-violet-300/90" }
+                  ].map(({ guardKey, name, samples, textClass }) => {
+                    const fpSamples = samples.filter((s: any) => s.error_type === "fp");
+                    const fnSamples = samples.filter((s: any) => s.error_type === "fn");
+                    if (samples.length === 0) return null;
+                    return (
+                      <div key={guardKey} className="px-4 py-2">
+                        <div className={`text-xs font-semibold ${textClass} mb-1`}>{name} — {fpSamples.length} FP, {fnSamples.length} FN</div>
+                        {fpSamples.length > 0 && (
+                          <details className="group mb-1">
+                            <summary className="text-xs cursor-pointer text-red-400 hover:text-red-300">FP: {fpSamples.length} benign wrongly blocked</summary>
+                            <div className="pl-2 space-y-1 max-h-40 overflow-y-auto mt-1">
+                              {fpSamples.map((s: any) => <div key={s.id} className="text-[11px] bg-black/20 rounded p-1.5 font-mono text-gray-300 break-words">{s.prompt}</div>)}
+                            </div>
+                          </details>
+                        )}
+                        {fnSamples.length > 0 && (
+                          <details className="group">
+                            <summary className="text-xs cursor-pointer text-orange-400 hover:text-orange-300">FN: {fnSamples.length} attacks missed</summary>
+                            <div className="pl-2 space-y-1 max-h-40 overflow-y-auto mt-1">
+                              {fnSamples.map((s: any) => <div key={s.id} className="text-[11px] bg-black/20 rounded p-1.5 font-mono text-gray-300 break-words">{s.prompt}</div>)}
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
             )}
 
             {/* Double-Layer Analytics (when either guard has it) */}
@@ -2142,7 +2321,7 @@ function EvaluationMode({
                 <h5 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider mb-3">Double-Layer Performance Analysis</h5>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {compareResults.guard1?.double_layer_analytics && (
-                    <div className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-4">
+                    <div key="guard1-analytics" className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-4">
                       <div className="text-sm font-semibold text-sky-300/90 mb-2">{compareResults.guard1?.guard_name}</div>
                       <div className="space-y-1.5 text-sm">
                         <div className="flex justify-between"><span className="text-gray-400">Zones A/B/C</span><span className="font-mono">{compareResults.guard1.double_layer_analytics.classifier_stage.zone_a_allowed} / {compareResults.guard1.double_layer_analytics.classifier_stage.zone_b_blocked} / {compareResults.guard1.double_layer_analytics.classifier_stage.zone_c_grey}</span></div>
@@ -2153,7 +2332,7 @@ function EvaluationMode({
                     </div>
                   )}
                   {compareResults.guard2?.double_layer_analytics && (
-                    <div className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-4">
+                    <div key="guard2-analytics" className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-4">
                       <div className="text-sm font-semibold text-violet-300/90 mb-2">{compareResults.guard2?.guard_name}</div>
                       <div className="space-y-1.5 text-sm">
                         <div className="flex justify-between"><span className="text-gray-400">Zones A/B/C</span><span className="font-mono">{compareResults.guard2.double_layer_analytics.classifier_stage.zone_a_allowed} / {compareResults.guard2.double_layer_analytics.classifier_stage.zone_b_blocked} / {compareResults.guard2.double_layer_analytics.classifier_stage.zone_c_grey}</span></div>
@@ -2274,144 +2453,243 @@ function EvaluationMode({
       {/* Compare All Datasets - Chart & Analysis */}
       {compareAllResults && compareAllResults.results_by_dataset && (
         <div className="relative bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6 animate-slide-up">
-          <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
+          <h3 className="text-xl font-bold mb-2 flex items-center gap-2">
             <Zap className="w-6 h-6 text-amber-400" />
             Performance Across All Datasets
           </h3>
-          <p className="text-gray-400 text-sm mb-6">
-            {compareAllResults.guard1_name} vs {compareAllResults.guard2_name}
+          <p className="text-gray-500 text-xs mb-6">
+            {compareAllResults.guard1_name} vs {compareAllResults.guard2_name} · {compareAllResults.combined?.total_samples ?? 0} total samples across {compareAllResults.results_by_dataset.filter((r: any) => !r.error).length} datasets
           </p>
 
-          {/* Accuracy by Dataset - vertical bars, muted colors */}
-          <div className="mb-8">
-            <h4 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Accuracy by Dataset</h4>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {compareAllResults.results_by_dataset.filter((r: any) => !r.error).map((r: any) => {
-                const v1 = r.guard1?.accuracy ?? 0;
-                const v2 = r.guard2?.accuracy ?? 0;
-                const winner1 = v1 > v2;
-                const winner2 = v2 > v1;
-                const barHeight = 80;
-                const h1 = Math.max(4, (v1 / 100) * barHeight);
-                const h2 = Math.max(4, (v2 / 100) * barHeight);
-                return (
-                  <div key={r.dataset_name} className="rounded-xl border border-white/10 bg-white/5 p-4">
-                    <div className="text-sm font-semibold text-gray-300 mb-3 truncate" title={r.dataset_name}>{r.dataset_name}</div>
-                    <div className="flex items-end gap-3" style={{ height: barHeight + 28 }}>
-                      <div className="flex flex-col items-center flex-1">
-                        <div
-                          className={`w-full rounded-t min-h-[4px] flex items-end justify-center ${winner1 ? "ring-1 ring-emerald-500/50" : ""}`}
-                          style={{ height: h1, backgroundColor: "rgba(14, 165, 233, 0.55)" }}
-                        >
-                          {h1 > 18 && <span className="text-[10px] font-medium text-white/90 pb-0.5">{v1}%</span>}
-                        </div>
-                        <span className="text-[10px] text-sky-300/80 mt-1">G1</span>
+          {/* === COMBINED METRICS: horizontal bars === */}
+          {compareAllResults.combined && (
+            <div className="space-y-6 mb-6">
+              {/* Metric bars */}
+              <div className="space-y-4">
+                {[
+                  { label: "Accuracy", key: "accuracy", unit: "%", lowerIsBetter: false },
+                  { label: "Precision", key: "precision", unit: "%", lowerIsBetter: false },
+                  { label: "Recall", key: "recall", unit: "%", lowerIsBetter: false },
+                  { label: "F1 Score", key: "f1_score", unit: "%", lowerIsBetter: false },
+                  { label: "FPR", key: "false_positive_rate", unit: "%", lowerIsBetter: true },
+                ].map((m) => {
+                  const v1 = compareAllResults.combined.guard1?.[m.key] ?? 0;
+                  const v2 = compareAllResults.combined.guard2?.[m.key] ?? 0;
+                  const lowerIsBetter = m.lowerIsBetter;
+                  const d1 = lowerIsBetter ? Math.max(0, 100 - v1) : v1;
+                  const d2 = lowerIsBetter ? Math.max(0, 100 - v2) : v2;
+                  const winner1 = lowerIsBetter ? v1 < v2 : v1 > v2;
+                  const winner2 = lowerIsBetter ? v2 < v1 : v2 > v1;
+                  return (
+                    <div key={m.key} className="space-y-1">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-400">{m.label}{lowerIsBetter ? " (↓)" : ""}</span>
+                        <span className="font-mono text-xs text-gray-500">
+                          {compareAllResults.guard1_name}: {v1}{m.unit} · {compareAllResults.guard2_name}: {v2}{m.unit}
+                          {Math.abs(v1 - v2) > 0 && <span className={winner1 ? " text-emerald-400" : " text-violet-400"}> (Δ {(v1 - v2).toFixed(2)})</span>}
+                        </span>
                       </div>
-                      <div className="flex flex-col items-center flex-1">
-                        <div
-                          className={`w-full rounded-t min-h-[4px] flex items-end justify-center ${winner2 ? "ring-1 ring-emerald-500/50" : ""}`}
-                          style={{ height: h2, backgroundColor: "rgba(139, 92, 246, 0.55)" }}
-                        >
-                          {h2 > 18 && <span className="text-[10px] font-medium text-white/90 pb-0.5">{v2}%</span>}
+                      <div className="flex gap-2">
+                        <div className="flex-1 h-6 bg-white/5 rounded-lg overflow-hidden">
+                          <div className={`h-full rounded-l flex items-center justify-end pr-2 ${winner1 ? "ring-1 ring-emerald-400/50" : ""}`}
+                            style={{ width: `${d1}%`, backgroundColor: winner1 ? "rgba(14, 165, 233, 0.65)" : "rgba(14, 165, 233, 0.35)" }}>
+                            {d1 > 15 && <span className="text-[10px] font-semibold text-white">{v1}{m.unit}</span>}
+                          </div>
                         </div>
-                        <span className="text-[10px] text-violet-300/80 mt-1">G2</span>
+                        <div className="flex-1 h-6 bg-white/5 rounded-lg overflow-hidden">
+                          <div className={`h-full rounded-l flex items-center justify-end pr-2 ${winner2 ? "ring-1 ring-emerald-400/50" : ""}`}
+                            style={{ width: `${d2}%`, backgroundColor: winner2 ? "rgba(139, 92, 246, 0.65)" : "rgba(139, 92, 246, 0.35)" }}>
+                            {d2 > 15 && <span className="text-[10px] font-semibold text-white">{v2}{m.unit}</span>}
+                          </div>
+                        </div>
                       </div>
                     </div>
-                    <div className="text-xs text-gray-500 mt-2">{r.guard1?.total_samples || 0} samples</div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+                  );
+                })}
+                <div className="flex gap-2 text-[10px] text-gray-500">
+                  <span className="flex-1 text-sky-400/80">{compareAllResults.guard1_name}</span>
+                  <span className="flex-1 text-violet-400/80">{compareAllResults.guard2_name}</span>
+                </div>
+              </div>
 
-          {/* Label Breakdown - Benign vs Malicious Performance (clean text, no graphs) */}
-          <div className="mb-8">
-            <h4 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Performance by Label (Benign vs Malicious)</h4>
-            <div className="space-y-4">
-              {compareAllResults.results_by_dataset.filter((r: any) => !r.error).map((r: any) => (
-                <div key={r.dataset_name} className="rounded-xl border border-white/10 bg-white/5 p-4">
-                  <div className="font-semibold text-gray-300 mb-3">{r.dataset_name}</div>
-                  <div className="space-y-2 text-sm">
-                    {(r.guard1?.by_label?.benign || r.guard2?.by_label?.benign) && (
-                      <div>
-                        <div className="text-xs text-emerald-400/80 mb-1">Benign (correctly allowed)</div>
-                        <div className="flex flex-wrap gap-x-6 gap-y-1">
-                          {r.guard1?.by_label?.benign && <span className="text-sky-300/90">G1: <span className="font-mono font-semibold text-white">{r.guard1.by_label.benign.rate}%</span> <span className="text-gray-500">({r.guard1.by_label.benign.correct}/{r.guard1.by_label.benign.total})</span></span>}
-                          {r.guard2?.by_label?.benign && <span className="text-violet-300/90">G2: <span className="font-mono font-semibold text-white">{r.guard2.by_label.benign.rate}%</span> <span className="text-gray-500">({r.guard2.by_label.benign.correct}/{r.guard2.by_label.benign.total})</span></span>}
-                        </div>
-                      </div>
-                    )}
-                    {(r.guard1?.by_label?.malicious || r.guard2?.by_label?.malicious) && (
-                      <div>
-                        <div className="text-xs text-rose-400/80 mb-1">Malicious (correctly blocked)</div>
-                        <div className="flex flex-wrap gap-x-6 gap-y-1">
-                          {r.guard1?.by_label?.malicious && <span className="text-sky-300/90">G1: <span className="font-mono font-semibold text-white">{r.guard1.by_label.malicious.rate}%</span> <span className="text-gray-500">({r.guard1.by_label.malicious.correct}/{r.guard1.by_label.malicious.total})</span></span>}
-                          {r.guard2?.by_label?.malicious && <span className="text-violet-300/90">G2: <span className="font-mono font-semibold text-white">{r.guard2.by_label.malicious.rate}%</span> <span className="text-gray-500">({r.guard2.by_label.malicious.correct}/{r.guard2.by_label.malicious.total})</span></span>}
-                        </div>
-                      </div>
-                    )}
-                    {/* Attack type breakdown for vectorAttacks */}
-                    {r.dataset_name === "vectorAttacks" && (r.guard1?.by_attack_type || r.guard2?.by_attack_type) && (
-                      <div className="mt-3 pt-3 border-t border-white/5">
-                        <div className="text-xs text-amber-400/80 mb-2">Obfuscation vs vector (allowed · blocked)</div>
-                        <div className="space-y-1.5 text-xs">
-                          {["obfuscation", "vector", "other"].filter(t => (r.guard1?.by_attack_type?.[t]?.total ?? 0) + (r.guard2?.by_attack_type?.[t]?.total ?? 0) > 0).map((atype) => (
-                            <div key={atype} className="flex flex-wrap gap-x-6 gap-y-1">
-                              <span className="text-gray-500 capitalize w-20">{atype}:</span>
-                              {r.guard1?.by_attack_type?.[atype] && <span className="text-sky-300/90">G1: <span className="text-orange-400">{r.guard1.by_attack_type[atype].allowed} allowed</span> · <span className="text-green-400">{r.guard1.by_attack_type[atype].blocked} blocked</span></span>}
-                              {r.guard2?.by_attack_type?.[atype] && <span className="text-violet-300/90">G2: <span className="text-orange-400">{r.guard2.by_attack_type[atype].allowed} allowed</span> · <span className="text-green-400">{r.guard2.by_attack_type[atype].blocked} blocked</span></span>}
+              {/* Confusion matrix side by side */}
+              <div className="rounded-xl border border-white/10 overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead><tr className="bg-white/5"><th className="text-left px-3 py-2 text-gray-500">Confusion Matrix</th><th className="text-center px-3 py-2 text-sky-300/90">{compareAllResults.guard1_name}</th><th className="text-center px-3 py-2 text-violet-300/90">{compareAllResults.guard2_name}</th></tr></thead>
+                  <tbody className="divide-y divide-white/5">
+                    <tr><td className="px-3 py-1.5 text-gray-400">TP (blocked attacks)</td><td className="px-3 py-1.5 text-center font-mono text-blue-400">{compareAllResults.combined.guard1?.confusion_matrix?.tp ?? 0}</td><td className="px-3 py-1.5 text-center font-mono text-blue-400">{compareAllResults.combined.guard2?.confusion_matrix?.tp ?? 0}</td></tr>
+                    <tr><td className="px-3 py-1.5 text-gray-400">TN (allowed benign)</td><td className="px-3 py-1.5 text-center font-mono text-green-400">{compareAllResults.combined.guard1?.confusion_matrix?.tn ?? 0}</td><td className="px-3 py-1.5 text-center font-mono text-green-400">{compareAllResults.combined.guard2?.confusion_matrix?.tn ?? 0}</td></tr>
+                    <tr><td className="px-3 py-1.5 text-gray-400">FP (benign wrongly blocked)</td><td className="px-3 py-1.5 text-center font-mono text-red-400">{compareAllResults.combined.guard1?.confusion_matrix?.fp ?? 0}</td><td className="px-3 py-1.5 text-center font-mono text-red-400">{compareAllResults.combined.guard2?.confusion_matrix?.fp ?? 0}</td></tr>
+                    <tr><td className="px-3 py-1.5 text-gray-400">FN (attacks missed)</td><td className="px-3 py-1.5 text-center font-mono text-orange-400">{compareAllResults.combined.guard1?.confusion_matrix?.fn ?? 0}</td><td className="px-3 py-1.5 text-center font-mono text-orange-400">{compareAllResults.combined.guard2?.confusion_matrix?.fn ?? 0}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Attack type breakdown bars */}
+              {(Object.keys(compareAllResults.combined.guard1?.by_attack_type || {}).length > 0 || Object.keys(compareAllResults.combined.guard2?.by_attack_type || {}).length > 0) && (
+                <div>
+                  <h5 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Detection Rate by Attack Type</h5>
+                  <div className="space-y-3">
+                    {["prompt_injection", "obfuscation", "vector", "encoding", "injection", "other"].filter(t => (compareAllResults.combined.guard1?.by_attack_type?.[t]?.total ?? 0) + (compareAllResults.combined.guard2?.by_attack_type?.[t]?.total ?? 0) > 0).map((atype) => {
+                      const g1 = compareAllResults.combined.guard1?.by_attack_type?.[atype] ?? { blocked: 0, total: 0, blocked_pct: 0 };
+                      const g2 = compareAllResults.combined.guard2?.by_attack_type?.[atype] ?? { blocked: 0, total: 0, blocked_pct: 0 };
+                      const r1 = g1.blocked_pct ?? (g1.total > 0 ? g1.blocked / g1.total * 100 : 0);
+                      const r2 = g2.blocked_pct ?? (g2.total > 0 ? g2.blocked / g2.total * 100 : 0);
+                      const winner1 = r1 > r2;
+                      const winner2 = r2 > r1;
+                      return (
+                        <div key={atype} className="space-y-1">
+                          <div className="flex justify-between text-xs">
+                            <span className="text-gray-300 capitalize font-medium">{atype.replace("_", " ")}</span>
+                            <span className="text-gray-500 font-mono">{g1.blocked ?? 0}/{g1.total ?? 0} · {g2.blocked ?? 0}/{g2.total ?? 0}</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <div className="flex-1 h-5 bg-white/5 rounded overflow-hidden">
+                              <div className={`h-full rounded-l flex items-center justify-end pr-1 ${winner1 ? "ring-1 ring-emerald-400/50" : ""}`}
+                                style={{ width: `${r1}%`, backgroundColor: winner1 ? "rgba(14, 165, 233, 0.65)" : "rgba(14, 165, 233, 0.35)" }}>
+                                {r1 > 15 && <span className="text-[9px] font-semibold text-white">{r1.toFixed(1)}%</span>}
+                              </div>
                             </div>
-                          ))}
+                            <div className="flex-1 h-5 bg-white/5 rounded overflow-hidden">
+                              <div className={`h-full rounded-l flex items-center justify-end pr-1 ${winner2 ? "ring-1 ring-emerald-400/50" : ""}`}
+                                style={{ width: `${r2}%`, backgroundColor: winner2 ? "rgba(139, 92, 246, 0.65)" : "rgba(139, 92, 246, 0.35)" }}>
+                                {r2 > 15 && <span className="text-[9px] font-semibold text-white">{r2.toFixed(1)}%</span>}
+                              </div>
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    )}
-                    {(!r.guard1?.by_label?.benign && !r.guard1?.by_label?.malicious && !r.guard2?.by_label?.benign && !r.guard2?.by_label?.malicious && !r.guard1?.by_attack_type && !r.guard2?.by_attack_type) && (
-                      <div className="text-gray-500">—</div>
-                    )}
+                      );
+                    })}
                   </div>
                 </div>
+              )}
+
+              {/* Per-dataset accuracy at a glance (compact) */}
+              <div className="rounded-xl border border-white/10 overflow-hidden">
+                <div className="px-3 py-2 bg-white/5 flex justify-between items-center">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Per-Dataset Accuracy</span>
+                  <button
+                    onClick={async () => {
+                      const g1n = compareAllResults.guard1_name || "G1";
+                      const g2n = compareAllResults.guard2_name || "G2";
+                      const rows = compareAllResults.results_by_dataset.filter((r: any) => !r.error).map((r: any) =>
+                        [r.dataset_name, r.guard1?.accuracy ?? "N/A", r.guard1?.precision ?? "N/A", r.guard1?.recall ?? "N/A", r.guard1?.f1_score ?? "N/A", r.guard1?.false_positive_rate ?? "N/A", r.guard2?.accuracy ?? "N/A", r.guard2?.precision ?? "N/A", r.guard2?.recall ?? "N/A", r.guard2?.f1_score ?? "N/A", r.guard2?.false_positive_rate ?? "N/A"]
+                      );
+                      const header = `Dataset | ${g1n} Acc | ${g1n} Prec | ${g1n} Rec | ${g1n} F1 | ${g1n} FPR | ${g2n} Acc | ${g2n} Prec | ${g2n} Rec | ${g2n} F1 | ${g2n} FPR`;
+                      const body = rows.map((r: (string | number)[]) => r.join(" | ")).join("\n");
+                      await navigator.clipboard.writeText(`${header}\n${body}`);
+                      alert("Copied summary table to clipboard");
+                    }}
+                    className="px-2 py-0.5 text-[10px] text-gray-500 hover:text-white bg-white/5 rounded border border-white/10"
+                  >
+                    <Copy className="w-3 h-3 inline mr-1" />Copy
+                  </button>
+                </div>
+                <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-white/5 border-t border-white/5">
+                      <th className="text-left px-3 py-2 text-gray-500" rowSpan={2}>Dataset</th>
+                      <th className="text-center px-2 py-1 text-sky-300/90 border-b border-white/5" colSpan={5}>{compareAllResults.guard1_name}</th>
+                      <th className="text-center px-2 py-1 text-violet-300/90 border-b border-white/5 border-l border-white/10" colSpan={5}>{compareAllResults.guard2_name}</th>
+                    </tr>
+                    <tr className="bg-white/5">
+                      <th className="text-center px-2 py-1 text-sky-300/70">Acc</th>
+                      <th className="text-center px-2 py-1 text-sky-300/70">Prec</th>
+                      <th className="text-center px-2 py-1 text-sky-300/70">Rec</th>
+                      <th className="text-center px-2 py-1 text-sky-300/70">F1</th>
+                      <th className="text-center px-2 py-1 text-sky-300/70">FPR</th>
+                      <th className="text-center px-2 py-1 text-violet-300/70 border-l border-white/10">Acc</th>
+                      <th className="text-center px-2 py-1 text-violet-300/70">Prec</th>
+                      <th className="text-center px-2 py-1 text-violet-300/70">Rec</th>
+                      <th className="text-center px-2 py-1 text-violet-300/70">F1</th>
+                      <th className="text-center px-2 py-1 text-violet-300/70">FPR</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {compareAllResults.results_by_dataset.map((r: any) => (
+                      <tr key={r.dataset_name} className={r.error ? "opacity-40" : "hover:bg-white/5"}>
+                        <td className="px-3 py-1.5 font-medium text-gray-300">{getDatasetDisplayName(r.dataset_name)}</td>
+                        {r.error ? <td colSpan={10} className="px-2 py-1.5 text-red-400">{r.error}</td> : <>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard1?.accuracy ?? "—"}%</td>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard1?.precision != null ? `${r.guard1.precision}%` : "N/A"}</td>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard1?.recall != null ? `${r.guard1.recall}%` : "N/A"}</td>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard1?.f1_score ?? "—"}%</td>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard1?.false_positive_rate ?? "—"}%</td>
+                          <td className="px-2 py-1.5 text-center font-mono border-l border-white/10">{r.guard2?.accuracy ?? "—"}%</td>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard2?.precision != null ? `${r.guard2.precision}%` : "N/A"}</td>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard2?.recall != null ? `${r.guard2.recall}%` : "N/A"}</td>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard2?.f1_score ?? "—"}%</td>
+                          <td className="px-2 py-1.5 text-center font-mono">{r.guard2?.false_positive_rate ?? "—"}%</td>
+                        </>}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Expand individual dataset details */}
+          <button
+            onClick={() => setShowIndividualDatasets(!showIndividualDatasets)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium text-gray-300 hover:text-white transition-all mt-2"
+          >
+            {showIndividualDatasets ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            {showIndividualDatasets ? "Hide per-dataset breakdown" : "Show per-dataset breakdown (label performance, attack types, confusion matrices)"}
+          </button>
+
+          {/* Expanded individual results */}
+          {showIndividualDatasets && (
+            <div className="mt-6 space-y-4">
+              {compareAllResults.results_by_dataset.filter((r: any) => !r.error).map((r: any) => (
+                <details key={r.dataset_name} className="group rounded-xl border border-white/10 bg-white/5 overflow-hidden">
+                  <summary className="px-4 py-3 cursor-pointer hover:bg-white/5 flex justify-between items-center">
+                    <span className="font-semibold text-gray-300">{getDatasetDisplayName(r.dataset_name)} <span className="text-xs text-gray-500 font-normal">({r.guard1?.total_samples ?? 0} samples · {r.guard1?.ground_truth ?? "mixed"})</span></span>
+                    <ChevronDown className="w-4 h-4 text-gray-500 group-open:rotate-180 transition-transform" />
+                  </summary>
+                  <div className="px-4 pb-4 space-y-3 border-t border-white/5">
+                    {/* Compact metrics table */}
+                    <table className="w-full text-xs mt-3">
+                      <thead><tr className="border-b border-white/5"><th className="text-left py-1 text-gray-500">Metric</th><th className="text-center py-1 text-sky-300/80">{compareAllResults.guard1_name}</th><th className="text-center py-1 text-violet-300/80">{compareAllResults.guard2_name}</th></tr></thead>
+                      <tbody className="divide-y divide-white/5">
+                        {[{l:"Accuracy",k:"accuracy"},{l:"Precision",k:"precision"},{l:"Recall",k:"recall"},{l:"F1",k:"f1_score"},{l:"FPR",k:"false_positive_rate"}].map(m=>(
+                          <tr key={m.k}><td className="py-1 text-gray-400">{m.l}</td><td className="py-1 text-center font-mono">{r.guard1?.[m.k] ?? 0}%</td><td className="py-1 text-center font-mono">{r.guard2?.[m.k] ?? 0}%</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {/* TP/TN/FP/FN */}
+                    <div className="flex gap-4 text-xs">
+                      <span className="text-blue-400">TP: {r.guard1?.confusion_matrix?.tp ?? 0}/{r.guard2?.confusion_matrix?.tp ?? 0}</span>
+                      <span className="text-green-400">TN: {r.guard1?.confusion_matrix?.tn ?? 0}/{r.guard2?.confusion_matrix?.tn ?? 0}</span>
+                      <span className="text-red-400">FP: {r.guard1?.confusion_matrix?.fp ?? 0}/{r.guard2?.confusion_matrix?.fp ?? 0}</span>
+                      <span className="text-orange-400">FN: {r.guard1?.confusion_matrix?.fn ?? 0}/{r.guard2?.confusion_matrix?.fn ?? 0}</span>
+                    </div>
+                    {/* Label breakdown */}
+                    {(r.guard1?.by_label?.benign || r.guard1?.by_label?.malicious || r.guard2?.by_label?.benign || r.guard2?.by_label?.malicious) && (
+                      <div className="text-xs space-y-1">
+                        {r.guard1?.by_label?.benign && <div className="text-gray-400">Benign allowed: <span className="text-sky-300">{r.guard1.by_label.benign.rate}% ({r.guard1.by_label.benign.correct}/{r.guard1.by_label.benign.total})</span>{r.guard2?.by_label?.benign && <> · <span className="text-violet-300">{r.guard2.by_label.benign.rate}% ({r.guard2.by_label.benign.correct}/{r.guard2.by_label.benign.total})</span></>}</div>}
+                        {r.guard1?.by_label?.malicious && <div className="text-gray-400">Malicious blocked: <span className="text-sky-300">{r.guard1.by_label.malicious.rate}% ({r.guard1.by_label.malicious.correct}/{r.guard1.by_label.malicious.total})</span>{r.guard2?.by_label?.malicious && <> · <span className="text-violet-300">{r.guard2.by_label.malicious.rate}% ({r.guard2.by_label.malicious.correct}/{r.guard2.by_label.malicious.total})</span></>}</div>}
+                      </div>
+                    )}
+                    {/* Attack types */}
+                    {(r.guard1?.by_attack_type || r.guard2?.by_attack_type) && Object.keys({...(r.guard1?.by_attack_type || {}), ...(r.guard2?.by_attack_type || {})}).length > 0 && (
+                      <div className="text-xs space-y-1">
+                        <div className="text-gray-500 font-semibold">Attack types:</div>
+                        {["prompt_injection","obfuscation","vector","encoding","injection","other"].filter(t => {
+                          const a = r.guard1?.by_attack_type?.[t]; const b = r.guard2?.by_attack_type?.[t];
+                          return ((a?.total ?? ((a?.allowed??0)+(a?.blocked??0))) + (b?.total ?? ((b?.allowed??0)+(b?.blocked??0)))) > 0;
+                        }).map(t => (
+                          <div key={t} className="text-gray-400 capitalize">{t.replace("_"," ")}: <span className="text-sky-300">{r.guard1?.by_attack_type?.[t]?.blocked ?? 0}/{(r.guard1?.by_attack_type?.[t]?.total ?? ((r.guard1?.by_attack_type?.[t]?.allowed??0)+(r.guard1?.by_attack_type?.[t]?.blocked??0)))} blocked</span> · <span className="text-violet-300">{r.guard2?.by_attack_type?.[t]?.blocked ?? 0}/{(r.guard2?.by_attack_type?.[t]?.total ?? ((r.guard2?.by_attack_type?.[t]?.allowed??0)+(r.guard2?.by_attack_type?.[t]?.blocked??0)))} blocked</span></div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </details>
               ))}
             </div>
-          </div>
-
-          {/* Summary Table */}
-          <div>
-            <h4 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">Full Metrics Summary</h4>
-            <div className="overflow-x-auto rounded-xl border border-white/10">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-white/5">
-                    <th className="text-left py-3 px-4 font-semibold text-gray-400">Dataset</th>
-                    <th className="text-center py-3 px-4 font-semibold text-sky-300/90">G1 Acc</th>
-                    <th className="text-center py-3 px-4 font-semibold text-sky-300/90">G1 Recall</th>
-                    <th className="text-center py-3 px-4 font-semibold text-sky-300/90">G1 FPR</th>
-                    <th className="text-center py-3 px-4 font-semibold text-violet-300/90">G2 Acc</th>
-                    <th className="text-center py-3 px-4 font-semibold text-violet-300/90">G2 Recall</th>
-                    <th className="text-center py-3 px-4 font-semibold text-violet-300/90">G2 FPR</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {compareAllResults.results_by_dataset.map((r: any) => (
-                    <tr key={r.dataset_name} className={r.error ? "opacity-60" : ""}>
-                      <td className="py-3 px-4 font-medium">{r.dataset_name}</td>
-                      {r.error ? (
-                        <td colSpan={6} className="py-3 px-4 text-red-400 text-xs">{r.error}</td>
-                      ) : (
-                        <>
-                          <td className="py-3 px-4 text-center">{r.guard1?.accuracy ?? "—"}%</td>
-                          <td className="py-3 px-4 text-center">{r.guard1?.recall ?? "—"}%</td>
-                          <td className="py-3 px-4 text-center">{r.guard1?.false_positive_rate ?? "—"}%</td>
-                          <td className="py-3 px-4 text-center">{r.guard2?.accuracy ?? "—"}%</td>
-                          <td className="py-3 px-4 text-center">{r.guard2?.recall ?? "—"}%</td>
-                          <td className="py-3 px-4 text-center">{r.guard2?.false_positive_rate ?? "—"}%</td>
-                        </>
-                      )}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -2435,7 +2713,7 @@ function EvaluationMode({
                   </h2>
                   {datasetPreview && (
                     <div className="flex items-center gap-3 mt-1">
-                      <span className="text-sm text-gray-400">{datasetPreview.dataset_name}</span>
+                      <span className="text-sm text-gray-400">{getDatasetDisplayName(datasetPreview.dataset_name)}</span>
                       <span className="text-gray-600">·</span>
                       <span className="text-xs text-gray-500 font-mono">{datasetPreview.hf_dataset}</span>
                       <span className="text-gray-600">·</span>
@@ -2616,11 +2894,23 @@ export default function Dashboard() {
     showDatasetPreview: false,
     previewLoading: false,
     showAllDifferences: false,
-    maxSamples: 2000
+    maxSamples: 0
   });
 
   useEffect(() => {
     fetchGuards();
+  }, []);
+
+  // Load persisted HF token on mount (evaluation mode)
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = localStorage.getItem(HF_TOKEN_STORAGE_KEY);
+        if (cached) {
+          setEvalModeState(s => ({ ...s, hfToken: cached }));
+        }
+      } catch (_) {}
+    }
   }, []);
 
   const fetchGuards = async () => {

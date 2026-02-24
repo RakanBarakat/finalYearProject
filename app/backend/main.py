@@ -24,24 +24,51 @@ _DATASET_SUBSET_SEED = 42
 
 def _classify_vector_attack_type(text: str) -> str:
     """
-    Heuristic classification for vectorAttacks dataset: obfuscation vs vector.
-    - Obfuscation: Unicode/homoglyphs, leetspeak, encoding tricks
-    - Vector: Character-level spacing (e.g. "B   y   p"), adversarial suffixes
+    Heuristic classification for vectorAttacks dataset. Categories for stats breakdown:
+    - vector: Attacks delivered via documents or images in unstructured context (e.g. content
+      from [Source: document], [OCR], [image/...], PDF, email body, meeting transcript, etc.).
+      The attack is "attached" to or embedded in document/image context.
+    - obfuscation: Unicode/homoglyphs, leetspeak, mixed script, or character-level spacing tricks.
+    - encoding: Base64, ROT13, hex, or other encoded payloads.
+    - injection: Direct prompt injection / jailbreak (ignore instructions, DAN, assume persona,
+      bypass safety) without the document/image wrapper.
+    - other: Adversarial suffixes, token tricks, or unclassified.
     """
     if not text or not isinstance(text, str):
         return "other"
-    t = text[:2000]  # Check first 2k chars
-    # Vector: 2+ spaces between single chars (spaced-character pattern)
-    vector_pattern = re.search(r"\w\s{2,}\w\s{2,}\w", t)
-    # Obfuscation: non-ASCII (Unicode, Cyrillic, etc.) or leetspeak (digit in word)
-    has_unicode = any(ord(c) > 127 for c in t)
-    leetspeak = bool(re.search(r"[a-zA-Z][0-9][a-zA-Z0-9]*|[a-zA-Z0-9]*[0-9][a-zA-Z]", t))
-    if vector_pattern and not (has_unicode or leetspeak):
+    t = text[:2000].lower()
+    # Vector: attacks from documents or images in unstructured context (delivery vector = doc/image)
+    vector_phrases = (
+        "[source:", "[ocr]", "document text:", "document:", "pdf content", "pdf:",
+        "image/ocr", "[image/", "[audio/", "meeting transcript", "transcript:",
+        "email i received", "here is the email", "attachment:", "from: admin",
+        "body:", "[extracted text]", "[log output]", "source: text/plain",
+        "source: message/", "source: image/", "ocr output:", "translated text from"
+    )
+    if any(p in t for p in vector_phrases):
         return "vector"
+    # Encoding: explicit decode instructions or encoded payloads
+    if "decode and execute:" in t or "rot13 decode" in t or "base64" in t:
+        return "encoding"
+    if re.search(r"[A-Za-z0-9+/]{20,}={0,2}\s*$", t) or re.search(r"\b[0-9a-fA-F]{16,}\b", t):
+        if "decode" in t or "execute" in t or "follow:" in t:
+            return "encoding"
+    # Injection: direct jailbreak / instruction override (not document-context)
+    injection_phrases = (
+        "ignore previous", "ignore all", "disregard", "bypass", "override", "system prompt",
+        "you are now", "assume persona", "act as dan", "do anything now", "developer mode",
+        "for the rest of this conversation", "supersede", "new instructions"
+    )
+    if any(p in t for p in injection_phrases):
+        return "injection"
+    # Obfuscation: Unicode, leetspeak, or character-level spacing (formatting tricks)
+    vector_pattern = re.search(r"\w\s{2,}\w\s{2,}\w", text[:2000])
+    has_unicode = any(ord(c) > 127 for c in text[:2000])
+    leetspeak = bool(re.search(r"[a-zA-Z][0-9][a-zA-Z0-9]*|[a-zA-Z0-9]*[0-9][a-zA-Z]", text[:2000]))
     if has_unicode or leetspeak:
         return "obfuscation"
     if vector_pattern:
-        return "vector"
+        return "obfuscation"
     return "other"
 
 # --- RISK GATING (3-ZONE) DEFAULTS ---
@@ -105,22 +132,46 @@ _LLM_CLASS_VARIATIONS = re.compile(
     r"(?:\s*[-:.]|\s*$|\s*\n)",
     re.IGNORECASE
 )
-_LLM_CLASS_KEYWORDS = re.compile(
-    r"(?i)\b(safe|harmful|injection|attack|benign|toxic|dangerous)\b"
-)
+
+# Structured patterns: classification verb/phrase + label (semantic, not just keyword)
+_STRUCTURED_PATTERNS = [
+    (re.compile(r"(?:classif(?:y|ication)|categor(?:y|ize)|verdict|answer|output|label)\s*[=:]\s*(BENIGN|HARMFUL|INJECTION)", re.I), 1),
+    (re.compile(r"(?:is|as)\s+(BENIGN|HARMFUL|INJECTION)\b", re.I), 1),
+    (re.compile(r"(?:this\s+prompt\s+is|the\s+prompt\s+is|i\s+classify\s+(?:this\s+as\s+)?)\s*(BENIGN|HARMFUL|INJECTION)", re.I), 1),
+    (re.compile(r"(?:respond(?:s|ing)\s+with\s+)?(BENIGN|HARMFUL|INJECTION)\s*(?:\.|$|\n)", re.I), 1),
+    (re.compile(r"^(BENIGN|HARMFUL|INJECTION)\s*[\.\-\:]", re.I | re.MULTILINE), 1),
+]
+# Negation: "not harmful" etc. — capture the negated label
+_NEGATION_PATTERNS = [
+    (re.compile(r"(?:is\s+not|isn't|not\s+|cannot\s+be\s+classified\s+as)\s+(harmful|injection)", re.I), "BENIGN"),
+    (re.compile(r"(?:is\s+not|isn't|not\s+)(benign|safe)", re.I), "HARMFUL"),
+]
 
 
 def parse_llm_classification_token(text: str) -> str | None:
     """
     Return one of BENIGN/HARMFUL/INJECTION from LLM response.
-    Uses multiple strategies for robustness.
+    Uses semantic/structural parsing first, then falls back to keyword extraction.
+    Handles negation, structured output, and natural language.
     """
     if not text:
         return None
 
     text = str(text).strip()
+    text_lower = text.lower()
 
-    # Strategy 1: Strict regex pattern (existing behavior)
+    # --- Negation handling (must run before positive matches) ---
+    for pat, default in _NEGATION_PATTERNS:
+        if pat.search(text):
+            return default
+
+    # --- Strategy 1: Structured/semantic patterns (classification phrase + label) ---
+    for pat, group_idx in _STRUCTURED_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(group_idx).upper()
+
+    # --- Strategy 2: Line-start pattern (LLM often puts label at start of line) ---
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -129,82 +180,46 @@ def parse_llm_classification_token(text: str) -> str | None:
         if m:
             return m.group(1).upper()
 
-    # Strategy 2: Search entire response for exact tokens
+    # --- Strategy 3: Token with delimiters (e.g. "BENIGN." or "HARMFUL:") ---
     m = _LLM_CLASS_VARIATIONS.search(text)
     if m:
         return m.group(1).upper()
 
-    # Strategy 3: Look for tokens anywhere in text (case-insensitive)
-    text_lower = text.lower()
-    tokens_found = []
-    token_scores = {
-        'benign': 0,
-        'harmful': 0,
-        'injection': 0,
-        'safe': 0,
-        'attack': 0,
-        'toxic': 0,
-        'dangerous': 0,
-    }
+    # --- Strategy 4: Very short response (likely single token) ---
+    if len(text) < 25:
+        cleaned = re.sub(r"[^\w\s]", "", text_lower).strip()
+        if cleaned in ("benign", "safe", "harmless", "ok"):
+            return "BENIGN"
+        if cleaned in ("harmful", "dangerous", "toxic", "unsafe"):
+            return "HARMFUL"
+        if cleaned in ("injection", "attack", "jailbreak", "prompt injection"):
+            return "INJECTION"
 
-    for token in token_scores.keys():
-        if f" {token} " in f" {text_lower} ":
-            tokens_found.append(token)
+    # --- Strategy 5: Contextual phrase matching (semantic, not bare keyword) ---
+    # Prefer "as BENIGN" / "as HARMFUL" over random occurrence of word
+    for label, phrases in [
+        ("BENIGN", [r"\bas\s+benign\b", r"\b(?:is|classified)\s+benign\b", r"safe\s+to\s+(?:use|allow)", r"legitimate\s+request"]),
+        ("HARMFUL", [r"\bas\s+harmful\b", r"\b(?:is|classified)\s+harmful\b", r"violates\s+(?:policy|safety)", r"malicious\s+intent"]),
+        ("INJECTION", [r"\bas\s+injection\b", r"\b(?:is|classified)\s+injection\b", r"prompt\s+injection", r"jailbreak\s+attempt"]),
+    ]:
+        for phrase in phrases:
+            if re.search(phrase, text, re.I):
+                return label
 
-    # Count occurrences and prioritize exact matches
-    for token in tokens_found:
-        if token in ['benign', 'safe']:
-            token_scores['benign'] += 2
-        elif token in ['harmful', 'toxic', 'dangerous', 'attack']:
-            token_scores['harmful'] += 2
-        elif token == 'injection':
-            token_scores['injection'] += 2
-
-    # Strategy 4: Context-aware fallback for common patterns
-    # If response contains negation patterns, invert the classification
-    is_negation = any(neg in text_lower for neg in [
-        'not benign', 'not harmful', 'not injection',
-        'is not', "isn't", 'no, it is', 'actually',
-    ])
-
-    # Strategy 5: Length-based heuristic for very short responses
-    if len(text) < 20:
-        text_lower = text.lower().strip()
-        if text_lower in ['benign', 'safe', 'harmless']:
-            return 'BENIGN'
-        elif text_lower in ['harmful', 'dangerous', 'toxic']:
-            return 'HARMFUL'
-        elif text_lower in ['injection', 'attack', 'jailbreak']:
-            return 'INJECTION'
-        elif text_lower in ['yes', 'no']:
-            # Very ambiguous - check context
-            if 'safe' in text_lower or 'benign' in text_lower:
-                return 'BENIGN'
-            else:
-                return 'HARMFUL'
-
-    # Return best match based on token scores
-    if tokens_found:
-        best = max(token_scores.keys(), key=lambda k: token_scores[k])
-        # Map back to canonical labels
-        if best in ['benign', 'safe']:
-            return 'BENIGN'
-        elif best in ['harmful', 'toxic', 'dangerous', 'attack']:
-            return 'HARMFUL'
-        elif best == 'injection':
-            return 'INJECTION'
-
-    # Strategy 6: Final fallback - try to extract from any line
+    # --- Strategy 6: Keyword fallback (last resort; can misclassify) ---
+    # Only use when keyword appears in verdict-like position (start of sentence, after colon)
     for line in text.splitlines():
-        line_lower = line.strip().lower()
-        # Remove common prefixes/suffixes
-        line_clean = re.sub(r'^[=\-\.\s]+|[=\-\.\s]+$', '', line_lower)
-        if line_clean in ['benign', 'safe', 'harmless']:
-            return 'BENIGN'
-        elif line_clean in ['harmful', 'dangerous', 'toxic', 'attack']:
-            return 'HARMFUL'
-        elif line_clean in ['injection', 'prompt injection']:
-            return 'INJECTION'
+        line_stripped = line.strip()
+        # Skip lines that look like explanations (long, contain "because", "since", etc.)
+        if len(line_stripped) > 80 or re.search(r"\b(because|since|however|although|example)\b", line_stripped, re.I):
+            continue
+        line_lower = line_stripped.lower()
+        if re.match(r"^(benign|safe|harmless)\b", line_lower) or re.search(r"[:]\s*(benign|safe)\b", line_lower):
+            return "BENIGN"
+        if re.match(r"^(harmful|dangerous|toxic)\b", line_lower) or re.search(r"[:]\s*(harmful|dangerous)\b", line_lower):
+            return "HARMFUL"
+        if re.match(r"^(injection|attack)\b", line_lower) or re.search(r"[:]\s*(injection|attack)\b", line_lower):
+            return "INJECTION"
 
     return None
 
@@ -492,15 +507,10 @@ def get_ollama_models():
 
 # --- EXTERNAL LLM API SUPPORT ---
 EXTERNAL_LLM_MODELS = [
-    # OpenRouter models
-    {"id": "openrouter/openchat-7b", "name": "OpenChat 7B", "provider": "OpenRouter"},
+    # OpenRouter models (censored / mainstream)
     {"id": "openrouter/llama-3.1-8b-instruct", "name": "Llama 3.1 8B", "provider": "OpenRouter"},
     {"id": "openrouter/llama-3.1-70b-instruct", "name": "Llama 3.1 70B", "provider": "OpenRouter"},
     {"id": "openrouter/mistral-7b-instruct", "name": "Mistral 7B", "provider": "OpenRouter"},
-    {"id": "openrouter/dolphin-2.9.1-llama-3.1-8b", "name": "Dolphin 2.9.1 Llama 3.1 8B", "provider": "OpenRouter"},
-    {"id": "openrouter/claude-3-haiku", "name": "Claude 3 Haiku", "provider": "OpenRouter"},
-    {"id": "openrouter/gemma-2-9b-it", "name": "Gemma 2 9B", "provider": "OpenRouter"},
-    {"id": "openrouter/deepseek-chat", "name": "DeepSeek Chat", "provider": "OpenRouter"},
     {"id": "openrouter/qwen-2.5-72b-instruct", "name": "Qwen 2.5 72B", "provider": "OpenRouter"},
     {"id": "openrouter/neverskip-nemotron-70b-instruct", "name": "Nemotron 70B", "provider": "OpenRouter"},
     # OpenAI models
@@ -508,15 +518,8 @@ EXTERNAL_LLM_MODELS = [
     {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini", "provider": "OpenAI"},
     {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo", "provider": "OpenAI"},
     {"id": "openai/gpt-3.5-turbo", "name": "GPT-3.5 Turbo", "provider": "OpenAI"},
-    # Anthropic models
-    {"id": "anthropic/claude-3-5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "Anthropic"},
-    {"id": "anthropic/claude-3-opus", "name": "Claude 3 Opus", "provider": "Anthropic"},
-    {"id": "anthropic/claude-3-haiku", "name": "Claude 3 Haiku", "provider": "Anthropic"},
-    {"id": "anthropic/claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "provider": "Anthropic"},
-    # Google Gemini models
-    {"id": "gemini/gemini-2.0-flash-exp", "name": "Gemini 2.0 Flash", "provider": "Gemini"},
-    {"id": "gemini/gemini-1.5-pro", "name": "Gemini 1.5 Pro", "provider": "Gemini"},
-    {"id": "gemini/gemini-1.5-flash", "name": "Gemini 1.5 Flash", "provider": "Gemini"},
+    # Abliteration (OpenAI-compatible, uncensored model under your control)
+    {"id": "abliteration/abliterated-model", "name": "Abliterated Model", "provider": "Abliteration"},
 ]
 
 @app.get("/external-llm-models")
@@ -538,21 +541,24 @@ def set_llm_api_key(req: ApiKeyRequest):
         conn.close()
         raise HTTPException(404, "Guard not found")
     
-    # Update or insert API key
+    # Only save non-empty key (never overwrite existing key with empty)
+    key = (req.api_key or "").strip()
+    if not key:
+        conn.close()
+        return {"status": "unchanged", "provider": req.provider, "message": "No key provided; existing key kept"}
     existing = conn.execute(
         "SELECT * FROM guard_api_keys WHERE guard_id = ? AND provider = ?",
         (req.guard_id, req.provider)
     ).fetchone()
-    
     if existing:
         conn.execute(
             "UPDATE guard_api_keys SET api_key = ? WHERE guard_id = ? AND provider = ?",
-            (req.api_key, req.guard_id, req.provider)
+            (key, req.guard_id, req.provider)
         )
     else:
         conn.execute(
             "INSERT INTO guard_api_keys (guard_id, provider, api_key) VALUES (?, ?, ?)",
-            (req.guard_id, req.provider, req.api_key)
+            (req.guard_id, req.provider, key)
         )
     conn.commit()
     conn.close()
@@ -581,12 +587,9 @@ def test_llm_api_key(req: ApiKeyRequest):
     elif req.provider == "openai":
         if not req.api_key.startswith("sk-"):
             return {"status": "error", "message": "Invalid OpenAI key format (should start with 'sk-')"}
-    elif req.provider == "anthropic":
-        if not req.api_key.startswith("sk-ant-"):
-            return {"status": "error", "message": "Invalid Anthropic key format (should start with 'sk-ant-')"}
-    elif req.provider == "gemini":
-        if not req.api_key.startswith("AIza"):
-            return {"status": "error", "message": "Invalid Gemini API key format (should start with 'AIza')"}
+    elif req.provider == "abliteration":
+        if not req.api_key.startswith("ak_"):
+            return {"status": "error", "message": "Invalid Abliteration key format (should start with 'ak_')"}
     
     test_prompt = "Respond with exactly one word: BENIGN"
     
@@ -638,34 +641,19 @@ def test_llm_api_key(req: ApiKeyRequest):
         except Exception as e:
             return {"status": "error", "message": str(e)}
     
-    elif req.provider == "anthropic":
+    elif req.provider == "abliteration":
         headers = {
-            "x-api-key": req.api_key,
-            "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01"
+            "Authorization": f"Bearer {req.api_key}",
+            "Content-Type": "application/json"
         }
         data = {
-            "model": "claude-haiku-2023-08-16",
+            "model": "abliterated-model",
+            "messages": [{"role": "user", "content": test_prompt}],
             "max_tokens": 10,
-            "messages": [{"role": "user", "content": test_prompt}]
+            "temperature": 0.0
         }
         try:
-            res = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=30)
-            if res.status_code == 200:
-                return {"status": "success", "message": "API key is valid"}
-            else:
-                return {"status": "error", "message": res.json().get("error", f"HTTP {res.status_code}")}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    elif req.provider == "gemini":
-        # Gemini API key is passed as query parameter
-        try:
-            # First verify the key works by checking models
-            res = requests.get(
-                f"https://generativelanguage.googleapis.com/v1beta/models?key={req.api_key}",
-                timeout=30
-            )
+            res = requests.post("https://api.abliteration.ai/v1/chat/completions", headers=headers, json=data, timeout=30)
             if res.status_code == 200:
                 return {"status": "success", "message": "API key is valid"}
             else:
@@ -996,14 +984,14 @@ def scan_prompt(req: ScanRequest):
     
     # --- HELPER: External LLM API caller ---
     def external_llm_response(provider: str, api_key: str, model_id: str):
-        """Call external LLM API (OpenRouter, OpenAI, Anthropic, Gemini)"""
+        """Call external LLM API (OpenRouter, OpenAI, Abliteration)"""
         
         system_prompt = guard["llm_prompt"] if guard["llm_prompt"] else DEFAULT_CLASSIFICATION_PROMPT
         user_prompt = f"User Prompt: \"{req.prompt}\"\n\nYour classification:"
         
         try:
-            # ========== OPENROUTER / OPENAI ==========
-            if provider in ["openrouter", "openai"]:
+            # ========== OPENROUTER / OPENAI / ABLITERATION (OpenAI-compatible) ==========
+            if provider in ["openrouter", "openai", "abliteration"]:
                 headers = {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"
@@ -1021,8 +1009,12 @@ def scan_prompt(req: ScanRequest):
                     "temperature": 0.0,
                     "max_tokens": 10
                 }
-                
-                url = "https://openrouter.ai/api/v1/chat/completions" if provider == "openrouter" else "https://api.openai.com/v1/chat/completions"
+                if provider == "openrouter":
+                    url = "https://openrouter.ai/api/v1/chat/completions"
+                elif provider == "openai":
+                    url = "https://api.openai.com/v1/chat/completions"
+                else:
+                    url = "https://api.abliteration.ai/v1/chat/completions"
                 res = requests.post(url, headers=headers, json=data, timeout=60)
                 
                 # Check for OpenAI/OpenRouter content policy violation (hard filter)
@@ -1056,116 +1048,6 @@ def scan_prompt(req: ScanRequest):
                     layer_results["llm"]["verdict"] = "BLOCKED"
                     layer_results["llm"]["category"] = "Harmful Content (Refusal)"
                     layer_results["llm"]["detail"] = f"{provider.upper()} Refusal: {raw_response[:80]}"
-                    return
-            
-            # ========== ANTHROPIC ==========
-            elif provider == "anthropic":
-                headers = {
-                    "x-api-key": api_key,
-                    "Content-Type": "application/json",
-                    "anthropic-version": "2023-06-01"
-                }
-                data = {
-                    "model": model_id,
-                    "max_tokens": 10,
-                    "messages": [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
-                }
-                res = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=60)
-                
-                if res.status_code != 200:
-                    detail = f"Anthropic HTTP {res.status_code}: {res.text[:200]}"
-                    layer_results["llm"]["status"] = "ERROR"
-                    layer_results["llm"]["detail"] = detail
-                    return
-                
-                response_data = res.json()
-                
-                # Check for Anthropic stop_reason refusal
-                if response_data.get("stop_reason") == "refusal":
-                    print(f"[DEBUG LLM] Anthropic issued refusal (stop_reason=refusal)")
-                    layer_results["llm"]["status"] = "PASS"
-                    layer_results["llm"]["verdict"] = "BLOCKED"
-                    layer_results["llm"]["category"] = "Harmful Content (Refusal)"
-                    layer_results["llm"]["detail"] = "Anthropic Refusal (stop_reason=refusal)"
-                    return
-                
-                raw_response = response_data.get("content", [{}])[0].get("text", "").strip()
-                
-                # Check for soft refusal
-                refusal_patterns = [
-                    "i cannot", "i can't", "i'm sorry", "i am sorry",
-                    "cannot assist", "can't help", "won't help", "not able to help"
-                ]
-                if any(pattern in raw_response.lower() for pattern in refusal_patterns):
-                    print(f"[DEBUG LLM] Anthropic issued soft refusal: '{raw_response[:80]}'")
-                    layer_results["llm"]["status"] = "PASS"
-                    layer_results["llm"]["verdict"] = "BLOCKED"
-                    layer_results["llm"]["category"] = "Harmful Content (Refusal)"
-                    layer_results["llm"]["detail"] = f"Anthropic Refusal: {raw_response[:80]}"
-                    return
-            
-            # ========== GOOGLE GEMINI ==========
-            elif provider == "gemini":
-                data = {
-                    "contents": [{
-                        "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]
-                    }],
-                    "generationConfig": {
-                        "temperature": 0.0,
-                        "maxOutputTokens": 10
-                    }
-                }
-                res = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}",
-                    headers={"Content-Type": "application/json"},
-                    json=data,
-                    timeout=60
-                )
-                
-                if res.status_code != 200:
-                    detail = f"Gemini HTTP {res.status_code}: {res.text[:200]}"
-                    layer_results["llm"]["status"] = "ERROR"
-                    layer_results["llm"]["detail"] = detail
-                    return
-                
-                response_data = res.json()
-                
-                # Check for Gemini safety block (finishReason = "SAFETY")
-                candidates = response_data.get("candidates", [])
-                if candidates:
-                    first_candidate = candidates[0]
-                    finish_reason = first_candidate.get("finishReason", "")
-                    
-                    if finish_reason == "SAFETY":
-                        print(f"[DEBUG LLM] Gemini blocked due to safety (finishReason=SAFETY)")
-                        layer_results["llm"]["status"] = "PASS"
-                        layer_results["llm"]["verdict"] = "BLOCKED"
-                        layer_results["llm"]["category"] = "Harmful Content (Safety Block)"
-                        
-                        # Get safety ratings for detail
-                        safety_ratings = first_candidate.get("safetyRatings", [])
-                        safety_info = ", ".join([f"{r.get('category', '')} ({r.get('probability', '')})" for r in safety_ratings[:2]])
-                        layer_results["llm"]["detail"] = f"Gemini Safety Block: {safety_info}"
-                        return
-                    
-                    # Check if content is empty (another safety signal)
-                    content = first_candidate.get("content", {})
-                    parts = content.get("parts", [])
-                    if not parts or not parts[0].get("text"):
-                        print(f"[DEBUG LLM] Gemini returned empty content (safety block)")
-                        layer_results["llm"]["status"] = "PASS"
-                        layer_results["llm"]["verdict"] = "BLOCKED"
-                        layer_results["llm"]["category"] = "Harmful Content (Empty Response)"
-                        layer_results["llm"]["detail"] = "Gemini Empty Response (likely safety blocked)"
-                        return
-                    
-                    raw_response = parts[0].get("text", "").strip()
-                else:
-                    print(f"[DEBUG LLM] Gemini returned no candidates (safety block)")
-                    layer_results["llm"]["status"] = "PASS"
-                    layer_results["llm"]["verdict"] = "BLOCKED"
-                    layer_results["llm"]["category"] = "Harmful Content (No Candidates)"
-                    layer_results["llm"]["detail"] = "Gemini No Candidates (likely safety blocked)"
                     return
             
             else:
@@ -1218,7 +1100,7 @@ def scan_prompt(req: ScanRequest):
             })
             return
         
-        # Check if using external API (OpenRouter, OpenAI, Anthropic, Gemini)
+        # Check if using external API (OpenRouter, OpenAI, Abliteration)
         external_provider = None
         external_api_key = None
         model_id = llm_model_name
@@ -1230,12 +1112,9 @@ def scan_prompt(req: ScanRequest):
         elif llm_model_name.startswith("openai/"):
             external_provider = "openai"
             model_id = llm_model_name.replace("openai/", "")
-        elif llm_model_name.startswith("anthropic/"):
-            external_provider = "anthropic"
-            model_id = llm_model_name.replace("anthropic/", "")
-        elif llm_model_name.startswith("gemini/"):
-            external_provider = "gemini"
-            model_id = llm_model_name.replace("gemini/", "")
+        elif llm_model_name.startswith("abliteration/"):
+            external_provider = "abliteration"
+            model_id = llm_model_name.replace("abliteration/", "")
         
         # Get API key from database if using external provider
         if external_provider:
@@ -1247,7 +1126,10 @@ def scan_prompt(req: ScanRequest):
                 external_api_key = key_result["api_key"]
             
             if not external_api_key:
-                error_msg = f"API key not configured for {external_provider}"
+                error_msg = (
+                    f"API key not configured for {external_provider}. "
+                    "Edit the guard → LLM Verifier layer → enter your API key and save."
+                )
                 layer_results["llm"]["status"] = "ERROR"
                 layer_results["llm"]["detail"] = error_msg
                 result["steps"].append({
@@ -1749,7 +1631,7 @@ def _load_evaluation_dataset(dataset_name: str, max_samples: int, hf_token: Opti
 class EvaluationRequest(BaseModel):
     guard_id: int
     dataset_name: str
-    max_samples: int = 100  # Limit for faster testing
+    max_samples: int = 0  # 0 = full dataset
     hf_token: Optional[str] = None  # Optional HuggingFace token for private datasets
 
 @app.post("/evaluate")
@@ -1798,7 +1680,7 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
             "latencies": [],
             "correct_samples": [],
             "incorrect_samples": [],
-            "by_attack_type": {"obfuscation": {"allowed": 0, "blocked": 0}, "vector": {"allowed": 0, "blocked": 0}, "other": {"allowed": 0, "blocked": 0}}  # For vectorAttacks only
+            "by_attack_type": {"obfuscation": {"allowed": 0, "blocked": 0}, "vector": {"allowed": 0, "blocked": 0}, "encoding": {"allowed": 0, "blocked": 0}, "injection": {"allowed": 0, "blocked": 0}, "other": {"allowed": 0, "blocked": 0}, "prompt_injection": {"allowed": 0, "blocked": 0}}
         }
         
         
@@ -1938,7 +1820,8 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
             zone_b = sum(1 for p in classifier_predictions.values() if p.get("zone") == "B")
             zone_c = sum(1 for p in classifier_predictions.values() if p.get("zone") == "C")
             zone_breakdown = {"A_allow": zone_a, "B_block": zone_b, "C_llm": zone_c}
-            print(f"[EVAL] Classifier done: {len(classifier_predictions)} samples, {classifier_latency_ms:.0f}ms/sample | Zones: A={zone_a}, B={zone_b}, C={zone_c} (LLM consulted for C only)")
+            classifier_batch_count = (len(all_prompts) + classifier_batch_size - 1) // classifier_batch_size
+            print(f"[EVAL] Classifier done: {len(classifier_predictions)} samples in {classifier_batch_count} batches (batch_size={classifier_batch_size}), {classifier_latency_ms:.0f}ms/sample | Zones: A={zone_a}, B={zone_b}, C={zone_c} (LLM consulted for C only)")
 
         # 4. BATCH LLM PROCESSING (stage 2 - GREY ZONE ONLY)
         llm_classifications = {}
@@ -1966,20 +1849,18 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                 print(f"[EVAL] LLM: {len(flagged_indices)} grey-zone prompts (of {total_samples})")
                 system_prompt = guard["llm_prompt"] if guard["llm_prompt"] else DEFAULT_CLASSIFICATION_PROMPT
 
-                # Check if using external LLM provider (OpenRouter, OpenAI, Anthropic, Gemini)
+                # Check if using external LLM provider (OpenRouter, OpenAI, Abliteration)
                 base_model = llm_verifier.strip()
                 
-                if base_model.startswith("openrouter/") or base_model.startswith("openai/") or base_model.startswith("anthropic/") or base_model.startswith("gemini/"):
+                if base_model.startswith("openrouter/") or base_model.startswith("openai/") or base_model.startswith("abliteration/"):
                     # External LLM - use API directly
                     external_provider = None
                     if base_model.startswith("openrouter/"):
                         external_provider = "openrouter"
                     elif base_model.startswith("openai/"):
                         external_provider = "openai"
-                    elif base_model.startswith("anthropic/"):
-                        external_provider = "anthropic"
-                    elif base_model.startswith("gemini/"):
-                        external_provider = "gemini"
+                    elif base_model.startswith("abliteration/"):
+                        external_provider = "abliteration"
                     
                     # Get API key
                     conn = get_db()
@@ -1990,7 +1871,11 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                     conn.close()
                     
                     if not key_result:
-                        raise HTTPException(500, f"API key not configured for {external_provider}")
+                        raise HTTPException(
+                            500,
+                            f"API key not configured for {external_provider}. "
+                            "Edit the guard → LLM Verifier layer → enter your API key and save."
+                        )
                     
                     external_api_key = key_result["api_key"]
                     working_model = base_model
@@ -2028,37 +1913,59 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                                 base_model,
                             ]
                         
+                        # Cold Ollama can take 30–60s to load model; use long timeout + one retry on timeout
+                        OLLAMA_PROBE_TIMEOUT = 60
+                        OLLAMA_PROBE_RETRIES = 2  # retry once on timeout (e.g. cold start)
                         print(f"[EVAL] Testing {len(candidates)} model variant(s) for '{base_model}'...")
                         for variant in candidates:
-                            try:
-                                test_res = requests.post(
-                                    "http://localhost:11434/api/generate",
-                                    json={
-                                        "model": variant, 
-                                        "prompt": "test", 
-                                        "stream": False,
-                                        "options": {"num_predict": 1}
-                                    },
-                                    timeout=10,
-                                )
-                                if test_res.status_code == 200:
-                                    working_model = variant
-                                    print(f"[EVAL] ✓ Found working LLM model variant: {variant}")
-                                    break
-                                else:
-                                    print(f"[EVAL] ✗ Variant '{variant}' returned HTTP {test_res.status_code}")
-                            except Exception as e:
-                                print(f"[EVAL] ✗ Variant '{variant}' failed: {type(e).__name__}")
-                                continue
+                            last_err = None
+                            for attempt in range(OLLAMA_PROBE_RETRIES):
+                                try:
+                                    test_res = requests.post(
+                                        "http://localhost:11434/api/generate",
+                                        json={
+                                            "model": variant,
+                                            "prompt": "test",
+                                            "stream": False,
+                                            "options": {"num_predict": 1}
+                                        },
+                                        timeout=OLLAMA_PROBE_TIMEOUT,
+                                    )
+                                    if test_res.status_code == 200:
+                                        working_model = variant
+                                        if attempt > 0:
+                                            print(f"[EVAL] ✓ Found working LLM model variant: {variant} (succeeded on retry)")
+                                        else:
+                                            print(f"[EVAL] ✓ Found working LLM model variant: {variant}")
+                                        break
+                                    else:
+                                        last_err = f"HTTP {test_res.status_code}"
+                                        print(f"[EVAL] ✗ Variant '{variant}' returned HTTP {test_res.status_code}")
+                                    break  # no retry on HTTP errors
+                                except requests.exceptions.Timeout:
+                                    last_err = "ReadTimeout"
+                                    if attempt < OLLAMA_PROBE_RETRIES - 1:
+                                        print(f"[EVAL] ✗ Variant '{variant}' timed out (attempt {attempt + 1}/{OLLAMA_PROBE_RETRIES}), retrying...")
+                                    else:
+                                        print(f"[EVAL] ✗ Variant '{variant}' failed: ReadTimeout (model may be cold; try running a compare again)")
+                                except Exception as e:
+                                    last_err = type(e).__name__
+                                    print(f"[EVAL] ✗ Variant '{variant}' failed: {last_err}")
+                                    break  # no retry on other errors
+                            if working_model:
+                                break
                         
                         # If no working model found, fail early
                         if not working_model:
-                            error_msg = f"No working Ollama model found for '{base_model}'. Tried {candidates}. Check 'ollama list'."
+                            error_msg = (
+                                f"No working Ollama model found for '{base_model}'. Tried {candidates}. "
+                                "If you saw ReadTimeout, Ollama may have been cold — run compare again (probe uses 60s timeout + 1 retry). Otherwise check 'ollama list'."
+                            )
                             print(f"[EVAL ERROR] {error_msg}")
                             raise HTTPException(500, error_msg)
 
                 # Warm up LLM model (skip for external APIs and if already warmed in this session)
-                is_external = working_model.startswith("openrouter/") or working_model.startswith("openai/") or working_model.startswith("anthropic/") or working_model.startswith("gemini/")
+                is_external = working_model.startswith("openrouter/") or working_model.startswith("openai/") or working_model.startswith("abliteration/")
                 if is_external:
                     print(f"[EVAL] External LLM ({working_model}) — no warm-up needed")
                 elif warmed_llm_model != working_model:
@@ -2082,19 +1989,21 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                 else:
                     print(f"[EVAL] LLM model {working_model} already warmed up, skipping warm-up")
 
-                # Smaller batches reduce prompt size and speed up evaluation.
-                # External LLMs have large context windows — send all prompts in 1 batch.
-                is_external = working_model.startswith("openrouter/") or working_model.startswith("openai/") or working_model.startswith("anthropic/") or working_model.startswith("gemini/")
-                BATCH_SIZE = len(flagged_indices) if is_external else 20
+                # LLM requests are batched to stay under context limits. We never send all prompts in one call.
+                is_external = working_model.startswith("openrouter/") or working_model.startswith("openai/") or working_model.startswith("abliteration/")
+                BATCH_SIZE = min(10, len(flagged_indices)) if is_external else 20  # small batches for external APIs (Abliteration can be slow)
                 chunk_times = []
 
-                # Process only flagged prompts in chunks
                 total_batches = (len(flagged_indices) + BATCH_SIZE - 1) // BATCH_SIZE
+                # Log actual batch sizes (last batch may be smaller)
+                batch_sizes = [min(BATCH_SIZE, len(flagged_indices) - s) for s in range(0, len(flagged_indices), BATCH_SIZE)]
+                batch_sizes_str = ", ".join(str(n) for n in batch_sizes) if len(batch_sizes) <= 10 else f"{batch_sizes[0]}×{len(batch_sizes)-1}+{batch_sizes[-1]}"
+                print(f"[EVAL] LLM batching: {len(flagged_indices)} grey-zone prompts → {total_batches} API call(s), sizes: [{batch_sizes_str}] (max {BATCH_SIZE}/call, {'external' if is_external else 'local'})")
                 
                 for batch_num, start in enumerate(range(0, len(flagged_indices), BATCH_SIZE), 1):
                     batch_idxs = flagged_indices[start : start + BATCH_SIZE]
                     batch_prompts = [all_prompts[i] for i in batch_idxs]
-
+                    print(f"[EVAL] LLM batch {batch_num}/{total_batches} ({len(batch_prompts)} prompts)...", flush=True)
 
                     # Calculate dynamic prompt length based on context window
                     MAX_CONTEXT = 65536 if is_external else 16384  # External LLMs have larger context
@@ -2153,7 +2062,7 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                     classifications_found: list[str] = []
                     
                     # Check if using external LLM
-                    if working_model.startswith("openrouter/") or working_model.startswith("openai/") or working_model.startswith("anthropic/") or working_model.startswith("gemini/"):
+                    if working_model.startswith("openrouter/") or working_model.startswith("openai/") or working_model.startswith("abliteration/"):
                         # External LLM - call API directly
                         external_provider = None
                         if working_model.startswith("openrouter/"):
@@ -2162,12 +2071,9 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                         elif working_model.startswith("openai/"):
                             external_provider = "openai"
                             model_id = working_model.replace("openai/", "")
-                        elif working_model.startswith("anthropic/"):
-                            external_provider = "anthropic"
-                            model_id = working_model.replace("anthropic/", "")
-                        elif working_model.startswith("gemini/"):
-                            external_provider = "gemini"
-                            model_id = working_model.replace("gemini/", "")
+                        elif working_model.startswith("abliteration/"):
+                            external_provider = "abliteration"
+                            model_id = working_model.replace("abliteration/", "")
                         
                         # Get API key
                         conn = get_db()
@@ -2188,7 +2094,7 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                                 res = None
                                 response_text = ""
                                 
-                                if external_provider in ("openrouter", "openai"):
+                                if external_provider in ("openrouter", "openai", "abliteration"):
                                     headers = {
                                         "Authorization": f"Bearer {external_api_key}",
                                         "Content-Type": "application/json"
@@ -2206,38 +2112,14 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                                         "temperature": 0.0,
                                         "max_tokens": max(max_output_tokens, 100)
                                     }
-                                    url = "https://openrouter.ai/api/v1/chat/completions" if external_provider == "openrouter" else "https://api.openai.com/v1/chat/completions"
-                                    res = requests.post(url, headers=headers, json=data, timeout=180)
+                                    if external_provider == "openrouter":
+                                        url = "https://openrouter.ai/api/v1/chat/completions"
+                                    elif external_provider == "openai":
+                                        url = "https://api.openai.com/v1/chat/completions"
+                                    else:
+                                        url = "https://api.abliteration.ai/v1/chat/completions"
+                                    res = requests.post(url, headers=headers, json=data, timeout=90)
                                     
-                                elif external_provider == "anthropic":
-                                    headers = {
-                                        "x-api-key": external_api_key,
-                                        "Content-Type": "application/json",
-                                        "anthropic-version": "2023-06-01"
-                                    }
-                                    data = {
-                                        "model": model_id,
-                                        "max_tokens": max(max_output_tokens, 100),
-                                        "temperature": 0.0,
-                                        "system": system_prompt,
-                                        "messages": [{"role": "user", "content": batch_prompt.replace(system_prompt + "\n\n", "")}]
-                                    }
-                                    res = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=data, timeout=180)
-                                    
-                                elif external_provider == "gemini":
-                                    headers = {"Content-Type": "application/json"}
-                                    data = {
-                                        "contents": [{
-                                            "parts": [{"text": batch_prompt}]
-                                        }],
-                                        "generationConfig": {
-                                            "temperature": 0.0,
-                                            "maxOutputTokens": max(max_output_tokens, 100)
-                                        }
-                                    }
-                                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={external_api_key}"
-                                    res = requests.post(url, headers=headers, json=data, timeout=180)
-                                
                                 # Log full response for debugging
                                 
                                 # Handle rate limit with retry
@@ -2256,10 +2138,11 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                                     error_detail = res.text[:200]
                                     status = res.status_code
                                     print(f"[EVAL ERROR] Batch {batch_num}: HTTP {status}: {error_detail}")
-                                    msg = {401: "Invalid API key — update your LLM API key in the guard settings.",
-                                           402: "Insufficient credits — add credits to your API key.",
-                                           403: "Access forbidden — check your API key permissions."}
-                                    raise HTTPException(status_code=502, detail=f"LLM API returned HTTP {status}. {msg.get(status, error_detail)}")
+                                    if status == 402:
+                                        hint = "Insufficient credits. Top up at abliteration.ai to continue." if external_provider == "abliteration" else "Insufficient credits — add credits to your API account."
+                                    else:
+                                        hint = {401: "Invalid API key — update in guard settings.", 403: "Access forbidden — check API key permissions."}.get(status, error_detail)
+                                    raise HTTPException(status_code=502, detail=f"LLM API returned HTTP {status}. {hint}")
                                 
                                 # Handle other non-200 errors
                                 if res.status_code != 200:
@@ -2272,31 +2155,8 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                                     print(f"[EVAL ERROR] Batch {batch_num}: HTTP {status}: {error_detail}")
                                     raise HTTPException(status_code=502, detail=f"LLM API returned HTTP {status}: {error_detail}")
                                 
-                                # === SUCCESS (200) — extract response text ===
-                                if external_provider in ("openrouter", "openai"):
-                                    response_text = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                                elif external_provider == "anthropic":
-                                    resp_data = res.json()
-                                    if resp_data.get("stop_reason") == "refusal":
-                                        # Model refused entire batch — mark all as Harmful
-                                        for _ in batch_prompts:
-                                            classifications_found.append("Harmful")
-                                        break
-                                    response_text = resp_data.get("content", [{}])[0].get("text", "").strip()
-                                elif external_provider == "gemini":
-                                    resp_data = res.json()
-                                    candidates = resp_data.get("candidates", [])
-                                    if candidates and candidates[0].get("finishReason") == "SAFETY":
-                                        for _ in batch_prompts:
-                                            classifications_found.append("Harmful")
-                                        break
-                                    elif candidates:
-                                        response_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-                                    else:
-                                        for _ in batch_prompts:
-                                            classifications_found.append("Harmful")
-                                        break
-                                
+                                # === SUCCESS (200) — extract response text (OpenAI-compatible: openrouter, openai, abliteration) ===
+                                response_text = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
                                 
                                 # Parse classifications (handles newline, space, comma formats)
                                 classifications_found = parse_llm_batch_classifications(response_text, len(batch_idxs))
@@ -2366,12 +2226,14 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                 
                 if chunk_times:
                     llm_total_time = sum(chunk_times)
-                    # Calculate actual per-prompt latency (total time / actual prompts processed)
                     llm_prompts_processed = len(llm_classifications)
                     llm_avg_latency_ms = (llm_total_time / llm_prompts_processed * 1000) if llm_prompts_processed > 0 else 0
-                    llm_min_latency_ms = (min(chunk_times) / BATCH_SIZE * 1000)
-                    llm_max_latency_ms = (max(chunk_times) / BATCH_SIZE * 1000)
-                    
+                    # Min/max per-prompt: use avg when single batch (avoid misleading batch-time/BATCH_SIZE)
+                    if len(chunk_times) == 1:
+                        llm_min_latency_ms = llm_max_latency_ms = llm_avg_latency_ms
+                    else:
+                        llm_min_latency_ms = (min(chunk_times) / BATCH_SIZE * 1000)
+                        llm_max_latency_ms = (max(chunk_times) / BATCH_SIZE * 1000)
                     print(f"[EVAL] LLM: {llm_prompts_processed} prompts in {llm_total_time:.1f}s ({llm_avg_latency_ms:.0f}ms/prompt)")
         else:
             # LLM is disabled or not configured
@@ -2431,10 +2293,8 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
             else:
                 is_sample_benign = (dataset_config["ground_truth"] == "benign")
             
-            if idx % 50 == 0:
-                # Progress every 50 samples for long runs
-                if total_samples > 50 and idx > 0 and idx % 50 == 0:
-                    print(f"[EVAL] Progress: {idx}/{total_samples}")
+            if total_samples > 50 and idx > 0 and idx % 50 == 0:
+                print(f"[EVAL] Progress: {idx}/{total_samples}")
             
             try:
                 start_time = time.time()
@@ -2529,9 +2389,14 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                         metrics["fn"] += 1  # False Negative (Missed Attack)
                         is_correct = False
 
-                    # For vectorAttacks: track obfuscation vs vector allowed/blocked
+                    # Track attack type: vectorAttacks = obfuscation/vector/other; StrongREJECT/ProtectAI = prompt_injection
                     if req.dataset_name == "vectorAttacks":
                         atype = _classify_vector_attack_type(prompt)
+                    elif req.dataset_name in ("StrongREJECT", "ProtectAI"):
+                        atype = "prompt_injection"
+                    else:
+                        atype = None
+                    if atype:
                         if atype not in metrics["by_attack_type"]:
                             metrics["by_attack_type"][atype] = {"allowed": 0, "blocked": 0}
                         if actual_verdict == "ALLOWED":
@@ -2550,7 +2415,9 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                     "id": idx,
                     "prompt": prompt[:200] + "..." if len(prompt) > 200 else prompt,
                     "verdict": actual_verdict,
-                    "latency_ms": round(total_latency, 2)
+                    "latency_ms": round(total_latency, 2),
+                    "ground_truth": "benign" if is_sample_benign else "malicious",
+                    "error_type": "fp" if (is_sample_benign and not is_correct) else "fn" if (not is_sample_benign and not is_correct) else None
                 }
                 
                 if is_correct:
@@ -2643,14 +2510,14 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
 
         # F1 Score (Harmonic Mean of Precision and Recall)
         # F1 = 2 * (Precision * Recall) / (Precision + Recall)
-        # Only meaningful when we have both positives and negatives
+        # Best practice: use 0-1 scale for academic papers; we also provide 0-100 for UI
         if response["precision"] + response["recall"] > 0:
-            response["f1_score"] = round(
-                2 * (response["precision"] * response["recall"]) / (response["precision"] + response["recall"]), 
-                2
-            )
+            f1_pct = 2 * (response["precision"] * response["recall"]) / (response["precision"] + response["recall"])
+            response["f1_score"] = round(f1_pct, 2)
+            response["f1_score_01"] = round(f1_pct / 100, 4)  # 0-1 scale for dissertation/LaTeX
         else:
             response["f1_score"] = 0.0
+            response["f1_score_01"] = 0.0
 
         # Label breakdown: performance on benign vs malicious samples
         by_label = {}
@@ -2685,8 +2552,8 @@ def evaluate_guardrail(req: EvaluationRequest, preloaded_data=None):
                 }
         response["by_label"] = by_label
 
-        # For vectorAttacks: add obfuscation vs vector breakdown
-        if req.dataset_name == "vectorAttacks" and metrics.get("by_attack_type"):
+        # Attack type breakdown: vectorAttacks = obfuscation/vector/other; StrongREJECT/ProtectAI = prompt_injection
+        if metrics.get("by_attack_type"):
             response["by_attack_type"] = {}
             for atype, counts in metrics["by_attack_type"].items():
                 total_at = counts["allowed"] + counts["blocked"]
@@ -2787,7 +2654,7 @@ class CompareRequest(BaseModel):
     guard_id_1: int
     guard_id_2: int
     dataset_name: str
-    max_samples: int = 100
+    max_samples: int = 0  # 0 = full dataset
     hf_token: Optional[str] = None
 
 @app.post("/compare")
@@ -2804,6 +2671,8 @@ def compare_guardrails(req: CompareRequest):
         raise HTTPException(404, f"Guardrail 1 (ID: {req.guard_id_1}) not found")
     if not guard2:
         raise HTTPException(404, f"Guardrail 2 (ID: {req.guard_id_2}) not found")
+    if req.guard_id_1 == req.guard_id_2:
+        raise HTTPException(400, "Cannot compare a guardrail to itself. Select two different guardrails.")
     
     print(f"[COMPARE] Comparing '{guard1['name']}' vs '{guard2['name']}' on dataset '{req.dataset_name}'")
     
@@ -2954,7 +2823,7 @@ COMPARE_ALL_DATASETS = ["notInject", "StrongREJECT", "vectorAttacks", "ProtectAI
 class CompareAllRequest(BaseModel):
     guard_id_1: int
     guard_id_2: int
-    max_samples_per_dataset: int = 200
+    max_samples_per_dataset: int = 0  # 0 = full dataset
     hf_token: Optional[str] = None
 
 @app.post("/compare-all")
@@ -2986,6 +2855,7 @@ def compare_all_datasets(req: CompareAllRequest):
                 "dataset_name": dataset_name,
                 "guard1": {
                     "accuracy": cmp["guard1"].get("accuracy", 0),
+                    "precision": cmp["guard1"].get("precision", 0),
                     "recall": cmp["guard1"].get("recall", 0),
                     "false_positive_rate": cmp["guard1"].get("false_positive_rate", 0),
                     "f1_score": cmp["guard1"].get("f1_score", 0),
@@ -3002,6 +2872,7 @@ def compare_all_datasets(req: CompareAllRequest):
                 },
                 "guard2": {
                     "accuracy": cmp["guard2"].get("accuracy", 0),
+                    "precision": cmp["guard2"].get("precision", 0),
                     "recall": cmp["guard2"].get("recall", 0),
                     "false_positive_rate": cmp["guard2"].get("false_positive_rate", 0),
                     "f1_score": cmp["guard2"].get("f1_score", 0),
@@ -3028,8 +2899,61 @@ def compare_all_datasets(req: CompareAllRequest):
                 "guard2_name": guard2["name"]
             })
 
+    # Aggregate combined metrics across all successful datasets
+    combined_tp1, combined_tn1, combined_fp1, combined_fn1 = 0, 0, 0, 0
+    combined_tp2, combined_tn2, combined_fp2, combined_fn2 = 0, 0, 0, 0
+    combined_by_attack_g1 = {}
+    combined_by_attack_g2 = {}
+    for r in results_by_dataset:
+        if r.get("error"):
+            continue
+        cm1 = r.get("guard1", {}).get("confusion_matrix", {})
+        cm2 = r.get("guard2", {}).get("confusion_matrix", {})
+        combined_tp1 += cm1.get("tp", 0)
+        combined_tn1 += cm1.get("tn", 0)
+        combined_fp1 += cm1.get("fp", 0)
+        combined_fn1 += cm1.get("fn", 0)
+        combined_tp2 += cm2.get("tp", 0)
+        combined_tn2 += cm2.get("tn", 0)
+        combined_fp2 += cm2.get("fp", 0)
+        combined_fn2 += cm2.get("fn", 0)
+        for atype, counts in r.get("guard1", {}).get("by_attack_type", {}).items():
+            if atype not in combined_by_attack_g1:
+                combined_by_attack_g1[atype] = {"allowed": 0, "blocked": 0}
+            combined_by_attack_g1[atype]["allowed"] += counts.get("allowed", 0)
+            combined_by_attack_g1[atype]["blocked"] += counts.get("blocked", 0)
+        for atype, counts in r.get("guard2", {}).get("by_attack_type", {}).items():
+            if atype not in combined_by_attack_g2:
+                combined_by_attack_g2[atype] = {"allowed": 0, "blocked": 0}
+            combined_by_attack_g2[atype]["allowed"] += counts.get("allowed", 0)
+            combined_by_attack_g2[atype]["blocked"] += counts.get("blocked", 0)
+
+    total_combined = combined_tp1 + combined_tn1 + combined_fp1 + combined_fn1
+    def _agg_metrics(tp, tn, fp, fn):
+        total = tp + tn + fp + fn
+        if total == 0:
+            return {"accuracy": 0, "precision": 0, "recall": 0, "f1_score": 0, "false_positive_rate": 0}
+        acc = (tp + tn) / total * 100
+        prec = (tp / (tp + fp) * 100) if (tp + fp) > 0 else 0
+        rec = (tp / (tp + fn) * 100) if (tp + fn) > 0 else 0
+        f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0
+        fpr = (fp / (fp + tn) * 100) if (fp + tn) > 0 else 0
+        return {"accuracy": round(acc, 2), "precision": round(prec, 2), "recall": round(rec, 2), "f1_score": round(f1, 2), "false_positive_rate": round(fpr, 2)}
+
+    combined_guard1 = _agg_metrics(combined_tp1, combined_tn1, combined_fp1, combined_fn1)
+    combined_guard1["confusion_matrix"] = {"tp": combined_tp1, "tn": combined_tn1, "fp": combined_fp1, "fn": combined_fn1}
+    combined_guard1["by_attack_type"] = {k: {**v, "total": v["allowed"] + v["blocked"], "blocked_pct": round(v["blocked"] / (v["allowed"] + v["blocked"]) * 100, 2) if (v["allowed"] + v["blocked"]) > 0 else 0} for k, v in combined_by_attack_g1.items() if (v["allowed"] + v["blocked"]) > 0}
+    combined_guard2 = _agg_metrics(combined_tp2, combined_tn2, combined_fp2, combined_fn2)
+    combined_guard2["confusion_matrix"] = {"tp": combined_tp2, "tn": combined_tn2, "fp": combined_fp2, "fn": combined_fn2}
+    combined_guard2["by_attack_type"] = {k: {**v, "total": v["allowed"] + v["blocked"], "blocked_pct": round(v["blocked"] / (v["allowed"] + v["blocked"]) * 100, 2) if (v["allowed"] + v["blocked"]) > 0 else 0} for k, v in combined_by_attack_g2.items() if (v["allowed"] + v["blocked"]) > 0}
+
     return {
         "results_by_dataset": results_by_dataset,
         "guard1_name": guard1["name"],
-        "guard2_name": guard2["name"]
+        "guard2_name": guard2["name"],
+        "combined": {
+            "total_samples": total_combined,
+            "guard1": combined_guard1,
+            "guard2": combined_guard2,
+        }
     }
