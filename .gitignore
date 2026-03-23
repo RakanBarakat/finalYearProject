@@ -4,6 +4,15 @@ nul
 .DS_Store
 Thumbs.db
 
+# --- IDE & Local Config ---
+.vscode/
+.idea/
+
+# --- Secrets & Environment ---
+.env
+.env.*
+*.env
+
 # --- Dependencies & Environments ---
 node_modules/
 **/node_modules/
@@ -18,9 +27,9 @@ env/
 dist/
 build/
 **/__pycache__/
+*.tsbuildinfo
 
 # --- Large Model Files & Checkpoints ---
-# Excludes heavy weights from classifier-training and app
 *.safetensors
 *.pt
 *.bin
@@ -29,10 +38,27 @@ build/
 checkpoint-*/
 **/checkpoint-*/
 
-# --- Archives & Large Configs ---
+# --- Database Files ---
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Backup Data ---
+classifier-training/safecopydata/
+
+# --- Archives ---
 *.rar
 *.zip
 *.7z
 *.tar.gz
-# Add specific large config files if they have unique extensions
-# *.json (only if your "huge" configs are specifically .json)
+
+# --- Docs & Notes (internal) ---
+docs/
+DATASET_ANALYSIS.md
+app/AGENTS.md
+app/DATASET_FEASIBILITY.md
+app/EVALUATION_GUIDE.md
+app/.github/
+app/backend/DATASET_BALANCE.md
+app/backend/METRICS_FORMULAS.md
+app/frontend/README.md
