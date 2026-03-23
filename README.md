@@ -53,7 +53,7 @@ This reduces expensive LLM calls by only invoking them for ambiguous cases. Boun
 ```bash
 cd app/backend
 pip install -r requirements.txt
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload
 ```
 
 ### Frontend
@@ -69,14 +69,6 @@ npm run dev
 ```bash
 cd app/backend
 python build_rag_index.py
-```
-
-### Environment Variables
-
-Create `app/.env`:
-
-```
-OPENROUTER_API_KEY=your_key_here
 ```
 
 ## Evaluation
